@@ -81,6 +81,28 @@ class LinkParser
     }
 
     /**
+     * An external URL as it's checked: without the fragment, with a lowercase scheme and host. Its sha1 is the key the URL's
+     * check result is stored under.
+     */
+    public static function normalizeUrl(string $url): string
+    {
+        $url = trim(explode('#', $url, 2)[0]);
+        if (preg_match('#^(https?)://([^/?]+)(.*)$#i', $url, $m)) {
+            return strtolower($m[1]) . '://' . strtolower($m[2]) . ($m[3] === '' ? '/' : $m[3]);
+        }
+        return $url;
+    }
+
+    /**
+     * A URL without what a harmless redirect changes: the scheme, www. and a trailing slash.
+     */
+    public static function comparableUrl(string $url): string
+    {
+        $url = preg_replace('#^https?://(www\.)?#i', '', self::normalizeUrl($url)) ?? $url;
+        return rtrim(strtolower(explode('?', $url, 2)[0]), '/') . (str_contains($url, '?') ? '?' . explode('?', $url, 2)[1] : '');
+    }
+
+    /**
      * The anchors an HTML string defines: the id and name attributes of its elements (headings, footnotes, …).
      *
      * @return string[]

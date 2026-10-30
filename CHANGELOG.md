@@ -1,5 +1,13 @@
 # Release Notes for Link Checker
 
+## 1.2.0 - 2026-10-30
+
+### Added
+- External pages are checked over HTTP in a queue job (`checkExternal`): 404 or 410 twice in a row is broken, a permanent redirect is a warning (not for http→https, www. or a trailing slash). Throttled per host (`hostDelay`), never to private or reserved addresses, hosts that block link checkers are skipped (`skipHosts`)
+- Utilities → Link Checker: every problem with filters and a CSV export
+- Ignore a link (in the utility or the Links panel), and stop ignoring it in the utility
+- `link-checker/check-urls` console command; `rebuild --skip-external`
+
 ## 1.1.0 - 2026-10-30
 
 ### Added

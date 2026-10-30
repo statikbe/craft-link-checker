@@ -15,6 +15,8 @@ class CheckHostsJob extends BaseJob
     {
         $hosts = LinkChecker::getInstance()->getHosts();
         $hosts->check($hosts->due(), fn(int $done, int $total) => $this->setProgress($queue, $done / max(1, $total)));
+        // The URLs of domains that exist can be checked now
+        LinkChecker::getInstance()->getUrls()->queueIfDue();
     }
 
     protected function defaultDescription(): ?string

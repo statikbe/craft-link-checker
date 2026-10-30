@@ -7,7 +7,7 @@ use craft\base\Batchable;
 use craft\elements\Entry;
 use craft\elements\GlobalSet;
 use craft\queue\BaseBatchedJob;
-use statikbe\linkchecker\helpers\IdBatcher;
+use statikbe\linkchecker\helpers\ListBatcher;
 use statikbe\linkchecker\LinkChecker;
 
 /**
@@ -17,9 +17,13 @@ class RebuildJob extends BaseBatchedJob
 {
     public int $batchSize = 50;
 
+    /** @var int[]|null the pages, fixed when the job starts */
+    public ?array $ids = null;
+
     protected function loadData(): Batchable
     {
-        return new IdBatcher(self::ids());
+        $this->ids ??= self::ids();
+        return new ListBatcher($this->ids);
     }
 
     protected function processItem(mixed $item): void
@@ -47,6 +51,7 @@ class RebuildJob extends BaseBatchedJob
     protected function after(): void
     {
         LinkChecker::getInstance()->getHosts()->queueIfDue();
+        LinkChecker::getInstance()->getUrls()->queueIfDue();
     }
 
     protected function defaultDescription(): ?string

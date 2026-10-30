@@ -21,6 +21,28 @@ class Settings extends Model
      */
     public bool $checkDomains = true;
 
+    /**
+     * @var bool Check external pages over HTTP, in a queue job: a page that answers 404 or 410 twice (at least an hour apart)
+     * is broken, a permanent redirect is a warning. Needs outbound HTTP from the server; switch it off per environment when
+     * that's not allowed.
+     */
+    public bool $checkExternal = true;
+
+    /**
+     * @var string[] Hosts whose pages aren't requested: sites that block link checkers (and would always look broken). Their
+     * domain is still checked. www. is ignored.
+     */
+    public array $skipHosts = ['facebook.com', 'instagram.com', 'linkedin.com', 'x.com', 'twitter.com', 'tiktok.com'];
+
+    /** @var int Seconds to wait for an external page */
+    public int $timeout = 10;
+
+    /** @var int Milliseconds between two requests to the same host */
+    public int $hostDelay = 1000;
+
+    /** @var int How many 404/410 answers in a row (at least an hour apart) make an external link broken */
+    public int $failuresBeforeBroken = 2;
+
     /** @var bool Also check the global sets (a footer, site settings) */
     public bool $checkGlobals = true;
 
@@ -72,7 +94,9 @@ class Settings extends Model
     protected function defineRules(): array
     {
         return [
-            [['excludeFields', 'internalHosts', 'ignorePatterns', 'knownAnchors'], 'safe'],
+            [['excludeFields', 'internalHosts', 'ignorePatterns', 'knownAnchors', 'skipHosts'], 'safe'],
+            [['checkExternal'], 'boolean'],
+            [['timeout', 'hostDelay', 'failuresBeforeBroken'], 'integer', 'min' => 1],
             [['checkAnchors', 'checkGlobals', 'panel', 'checkDomains'], 'boolean'],
             [['crossSiteLinks'], 'in', 'range' => ['ok', 'warning']],
             [['checkEmailAndPhone'], 'boolean'],
@@ -94,6 +118,22 @@ class Settings extends Model
     {
         foreach ($this->knownAnchors as $known) {
             if ($known === $anchor || (str_starts_with($known, '#') && strlen($known) > 2 && @preg_match($known, $anchor) === 1)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Whether the pages of a host aren't requested (skipHosts).
+     */
+    public function skipsHost(string $host): bool
+    {
+        $host = strtolower($host);
+        $host = str_starts_with($host, 'www.') ? substr($host, 4) : $host;
+        foreach ($this->skipHosts as $skip) {
+            $skip = strtolower($skip);
+            if ($host === $skip || str_ends_with($host, '.' . $skip)) {
                 return true;
             }
         }

@@ -10,6 +10,7 @@ use craft\elements\Entry;
 use craft\elements\GlobalSet;
 use craft\helpers\Db;
 use craft\helpers\StringHelper;
+use statikbe\linkchecker\helpers\LinkParser;
 use statikbe\linkchecker\LinkChecker;
 
 /**
@@ -96,6 +97,7 @@ class Index extends Component
                             $link['label'], $link['issue'],
                             $link['fallbackUri'] !== null ? mb_substr($link['fallbackUri'], 0, 500) : null, $link['fallbackSiteId'],
                             $link['host'] !== null ? mb_substr($link['host'], 0, 255) : null,
+                            $link['kind'] === 'external' && $link['host'] !== null ? sha1(LinkParser::normalizeUrl($link['url'])) : null,
                             $now, $now, StringHelper::UUID(),
                         ];
                     }
@@ -104,7 +106,7 @@ class Index extends Component
                 if ($rows) {
                     Db::batchInsert(self::TABLE, [
                         'sourceId', 'siteId', 'elementId', 'fieldId', 'location', 'kind', 'targetId', 'targetSiteId', 'uri',
-                        'url', 'suffix', 'label', 'issue', 'fallbackUri', 'fallbackSiteId', 'host', 'dateCreated', 'dateUpdated', 'uid',
+                        'url', 'suffix', 'label', 'issue', 'fallbackUri', 'fallbackSiteId', 'host', 'urlHash', 'dateCreated', 'dateUpdated', 'uid',
                     ], $rows);
                 }
             }
@@ -134,8 +136,9 @@ class Index extends Component
                 Craft::error("Couldn't read the links of entry {$id}: {$e->getMessage()}", __METHOD__);
             }
         }
-        // New domains are looked up in a queue job, not in the editor's request
+        // New domains and external URLs are checked in queue jobs, not in the editor's request
         LinkChecker::getInstance()->getHosts()->queueIfDue();
+        LinkChecker::getInstance()->getUrls()->queueIfDue();
     }
 
     /**

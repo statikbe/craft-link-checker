@@ -14,9 +14,10 @@
                         <span class="lc-panel__why">{{ problem.reasonLabel }}</span>
                         <span class="lc-panel__where">{{ problem.location }}</span>
                     </span>
+                    <button type="button" class="lc-panel__ignore" data-ignore="{{ problem.url }}" data-page-id="{{ pageId }}" title="{{ 'Ignore this link everywhere'|t('link-checker') }}" aria-label="{{ 'Ignore this link everywhere'|t('link-checker') }}">{{ 'Ignore'|t('link-checker') }}</button>
                 </li>
             {% endfor %}
         </ul>
-        <p class="lc-panel__note light">{{ 'Of external links only the domain is checked, not the page.'|t('link-checker') }}</p>
+        <p class="lc-panel__note light">{{ 'External pages are checked in the background.'|t('link-checker') }}</p>
     {% endif %}
 </div>

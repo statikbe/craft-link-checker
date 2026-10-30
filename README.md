@@ -5,9 +5,10 @@ editors can fix them before visitors find them.
 
 - **Broken links**: links to entries that were deleted, are in the trash, disabled, expired, not in the page's site or have no
   page of their own; links to deleted assets; links to pages of the site itself (`/nl/over-ons`, `https://example.be/…`)
-  that no longer exist; links to a website whose domain doesn't exist (a typo, an expired domain).
+  that no longer exist; links to a website whose domain doesn't exist (a typo, an expired domain); external pages that
+  answer 404 or 410.
 - **Warnings**: links to entries that aren't published yet; links to a page that a redirect sends on (link to the page
-  itself); anchors (`#team`) that aren't on the target page; invalid email addresses and phone numbers; a deleted entry whose
+  itself); external pages that moved permanently; anchors (`#team`) that aren't on the target page; invalid email addresses and phone numbers; a deleted entry whose
   saved URL still works.
 - **Broken links** dashboard widget: the pages with broken links, with a link to edit each one and every broken link with
   its reason and where it is (*Content builder 2 (Content row) › Columns 1 (Text) › Text*). Each user only sees the pages
@@ -16,6 +17,9 @@ editors can fix them before visitors find them.
 - **Check on publish**: a warning (or, with `'block'`, an error that stops the save) when a page has broken links, shown on
   the row, the block or column and the field, as for Craft's own errors.
 - **Global sets** (a footer, site settings) are checked too.
+- **Utilities → Link Checker**: every problem with filters (broken or warnings, site, search), a CSV export, and the ignored
+  links.
+- **Ignore** a link (in the utility or the Links panel): it's no longer reported anywhere, until you stop ignoring it.
 - **Console**: `craft link-checker/rebuild` reads every page again; `craft link-checker/report` lists the problems.
 
 It reads native Link fields, rich text fields (CKEditor, Redactor) and [Hyper](https://verbb.io/craft-plugins/hyper) fields,
@@ -34,10 +38,25 @@ links typed as a URL break when a page moves. Those are matched against the URIs
 templates of the site, and the redirects of [SEO Fields](https://plugins.craftcms.com/seo-fields) and
 [Retour](https://plugins.craftcms.com/retour).
 
-Of external links (to other websites) only the domain is checked: a DNS lookup in a queue job, cached per domain (a domain
-that exists is looked up again after 7 days, one that doesn't after a day). The lookups never run in an editor's request, and
-when even `example.com` can't be looked up (no network, a broken resolver) nothing is marked. Checking the pages themselves
-over HTTP is planned for a later version.
+## External links
+
+External links (to other websites) are checked in queue jobs, never in an editor's request:
+
+1. **The domain** is looked up (DNS), cached per domain: again after 7 days when it exists, after a day when it doesn't. When
+   even `example.com` can't be looked up (no network, a broken resolver) nothing is marked.
+2. **The page** is requested (`checkExternal`), each URL once however many pages link to it: HEAD first, a GET when a server
+   doesn't answer HEAD properly. One request at a time, with `hostDelay` between two requests to the same host.
+   - 404 or 410 twice in a row, at least an hour apart (`failuresBeforeBroken`): **broken**.
+   - A permanent redirect (301, 308) to a page that works: a **warning**. Not when it only changes http to https, `www.` or
+     a trailing slash.
+   - Anything else (401, 403, 429, 5xx, a timeout, an SSL error): unknown, never reported. Sites that block link checkers
+     would always look broken, so their pages aren't requested (`skipHosts`: Facebook, Instagram, LinkedIn, X, TikTok).
+   - A working page is checked again after 7 days, a failing one after an hour, a broken or unknown one after a day.
+   - Redirects are followed by hand, so every step is checked: only http(s) on ports 80 and 443, never an address in a
+     private or reserved range (the server's own network, cloud metadata), and the checked address is the one connected to.
+
+This needs outbound HTTP from the server. Where that's not allowed, set `'checkExternal' => false` for that environment;
+the domains are still checked.
 
 ## Requirements
 
@@ -53,8 +72,11 @@ php craft plugin/install link-checker
 Installing queues a job that reads every page. On a large site you can also run it yourself:
 
 ```bash
-php craft link-checker/rebuild           # every page, now, with a progress bar
-php craft link-checker/rebuild --queue   # as a queue job
+php craft link-checker/rebuild                   # every page, the domains and the external pages, now
+php craft link-checker/rebuild --skip-external   # without requesting the external pages
+php craft link-checker/rebuild --queue           # as a queue job
+php craft link-checker/check-urls                # the external pages that are due (--all: every one)
+php craft link-checker/report                    # the broken links (--warnings: the warnings too)
 ```
 
 Then add the **Broken links** widget to the dashboard.
@@ -98,6 +120,14 @@ return [
     // Check that the domain of an external link exists (DNS)
     'checkDomains' => true,
 
+    // Request external pages (HTTP): 404/410 twice is broken, a permanent redirect a warning
+    'checkExternal' => true,
+    // Hosts whose pages aren't requested (they block link checkers); their domain is still checked
+    'skipHosts' => ['facebook.com', 'instagram.com', 'linkedin.com', 'x.com', 'twitter.com', 'tiktok.com'],
+    'timeout' => 10,               // seconds
+    'hostDelay' => 1000,           // milliseconds between two requests to the same host
+    'failuresBeforeBroken' => 2,
+
     // When an entry with broken links is published: 'warn' (saved, with a warning), 'block' (not saved, the errors on the
     // fields) or false. Warnings never count. A link can break without the page being edited, so 'warn' is the default.
     'mode' => 'warn',
@@ -127,6 +157,16 @@ With `'warn'`, publishing a page with broken links shows a warning that lists th
 isn't saved: each broken link is shown where it is, on the row or block, the column (its card turns red) and the field. Only
 broken links count, never warnings, and only when an entry is published in a web request: not for drafts, autosaves,
 resaving or console commands.
+
+## Utilities → Link Checker
+
+Every link with a problem, with the page (a link to edit it), the site, the link, the problem and where it is. Filter by
+broken links, warnings or both, by site, and search in the page, the link and the location. **Export CSV** downloads the
+filtered list. Users need Craft's permission for the utility ("Link Checker" under Utilities).
+
+**Ignore** stops reporting a link everywhere it's used (by its stored value: a URL, an entry reference, a mailto:). The
+ignored links are listed at the bottom, with who ignored them and **Stop ignoring**. An editor can also ignore a link in the
+Links panel of a page they may edit.
 
 ## Widget
 

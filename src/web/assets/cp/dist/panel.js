@@ -53,6 +53,20 @@
             }).catch(() => {});
         };
 
+        // Ignore a link everywhere (Utilities → Link Checker lists the ignored links)
+        body.addEventListener('click', (ev) => {
+            const button = ev.target.closest('[data-ignore]');
+            if (!button) {
+                return;
+            }
+            button.disabled = true;
+            Craft.sendActionRequest('POST', 'link-checker/utility/ignore', {
+                data: {url: button.dataset.ignore, pageId: button.dataset.pageId},
+            }).then(() => refresh()).catch(() => {
+                button.disabled = false;
+            });
+        });
+
         Garnish.on(Craft.ElementEditor, 'afterSaveDraft', (ev) => {
             if (ev.target === editorOf()) {
                 refresh(ev.response?.data?.elementId ?? ev.response?.elementId);

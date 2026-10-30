@@ -20,3 +20,11 @@ it('knows the anchors the templates render, as strings or patterns', function() 
         ->and($settings->isKnownAnchor('form-12'))->toBeTrue()
         ->and($settings->isKnownAnchor('team'))->toBeFalse();
 });
+
+it('skips the hosts that block link checkers, with or without www and subdomains', function() {
+    $settings = new Settings();
+    expect($settings->skipsHost('www.facebook.com'))->toBeTrue()
+        ->and($settings->skipsHost('nl-be.facebook.com'))->toBeTrue()
+        ->and($settings->skipsHost('notfacebook.com'))->toBeFalse()
+        ->and($settings->skipsHost('www.statik.be'))->toBeFalse();
+});

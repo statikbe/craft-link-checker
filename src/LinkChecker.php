@@ -15,15 +15,19 @@ use craft\events\RegisterComponentTypesEvent;
 use craft\events\RegisterTemplateRootsEvent;
 use craft\helpers\Queue;
 use craft\services\Dashboard;
+use craft\services\Utilities;
 use craft\web\View;
 use statikbe\linkchecker\jobs\RebuildJob;
 use statikbe\linkchecker\models\Settings;
 use statikbe\linkchecker\services\Checker;
 use statikbe\linkchecker\services\Extractor;
 use statikbe\linkchecker\services\Hosts;
+use statikbe\linkchecker\services\Ignores;
 use statikbe\linkchecker\services\Index;
 use statikbe\linkchecker\services\Redirects;
 use statikbe\linkchecker\services\Report;
+use statikbe\linkchecker\services\Urls;
+use statikbe\linkchecker\utilities\LinkCheckerUtility;
 use statikbe\linkchecker\web\assets\cp\LinkCheckerAsset;
 use statikbe\linkchecker\widgets\BrokenLinks;
 use yii\base\Event;
@@ -47,6 +51,8 @@ class LinkChecker extends Plugin
                 'redirects' => Redirects::class,
                 'checker' => Checker::class,
                 'hosts' => Hosts::class,
+                'urls' => Urls::class,
+                'ignores' => Ignores::class,
             ],
         ];
     }
@@ -83,6 +89,9 @@ class LinkChecker extends Plugin
 
         Event::on(Dashboard::class, Dashboard::EVENT_REGISTER_WIDGET_TYPES, function(RegisterComponentTypesEvent $event) {
             $event->types[] = BrokenLinks::class;
+        });
+        Event::on(Utilities::class, Utilities::EVENT_REGISTER_UTILITIES, function(RegisterComponentTypesEvent $event) {
+            $event->types[] = LinkCheckerUtility::class;
         });
 
         if (Craft::$app->getRequest()->getIsCpRequest()) {
@@ -129,6 +138,16 @@ class LinkChecker extends Plugin
         return $this->get('hosts');
     }
 
+    public function getUrls(): Urls
+    {
+        return $this->get('urls');
+    }
+
+    public function getIgnores(): Ignores
+    {
+        return $this->get('ignores');
+    }
+
     /**
      * The Links panel: the problems of the page as it's edited (settings → panel), for entries in a checked section.
      */
@@ -166,7 +185,7 @@ class LinkChecker extends Plugin
             unset($problem['element'], $problem['chain']);
         }
         unset($problem);
-        return ['problems' => $problems, 'total' => count($result['links'])];
+        return ['problems' => $problems, 'total' => count($result['links']), 'pageId' => (int)$entry->getCanonicalId()];
     }
 
     /**

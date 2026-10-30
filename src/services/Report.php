@@ -36,6 +36,8 @@ class Report extends Component
         'page-not-found' => self::BROKEN,
         'redirected' => self::WARNING,
         'domain-not-found' => self::BROKEN,
+        'external-not-found' => self::BROKEN,
+        'moved-permanently' => self::WARNING,
         'anchor-missing' => self::WARNING,
         'pending' => self::WARNING,
         'deleted-fallback' => self::WARNING,
@@ -109,6 +111,9 @@ class Report extends Component
                 'targetUri' => 'tes.uri', 'targetTitle' => 'tes.title', 'targetPostDate' => 'ten.postDate',
                 'targetExpiryDate' => 'ten.expiryDate',
                 'hostResolves' => 'h.resolves',
+                'externalStatus' => 'u.status',
+                'externalCode' => 'u.httpCode',
+                'externalFinalUrl' => 'u.finalUrl',
             ])
             ->from(['l' => Index::TABLE])
             // The page: not in the trash, a canonical entry
@@ -123,12 +128,15 @@ class Report extends Component
             ->leftJoin(['ten' => Table::ENTRIES], '[[ten.id]] = [[l.targetId]]')
             // The domain of an external link
             ->leftJoin(['h' => Hosts::TABLE], '[[h.host]] = [[l.host]]')
+            // The last check of an external page
+            ->leftJoin(['u' => Urls::TABLE], '[[u.urlHash]] = [[l.urlHash]]')
             ->where(['se.dateDeleted' => null, 'se.draftId' => null, 'se.revisionId' => null])
             ->andWhere(['or', ['not', ['sen.id' => null]], ['not', ['gs.id' => null]]])
             ->andWhere(['or',
                 ['not', ['l.issue' => null]],
                 $settings->checkAnchors ? ['not', ['l.suffix' => null]] : '1 = 0',
                 $settings->checkDomains ? ['h.resolves' => false] : '1 = 0',
+                $settings->checkExternal ? ['u.status' => [Urls::BROKEN, Urls::REDIRECT]] : '1 = 0',
                 ['l.kind' => LinkParser::KIND_URL],
                 ['and',
                     ['l.kind' => $elementKinds],
@@ -206,9 +214,20 @@ class Report extends Component
         $resolves = $hosts ? (new Query())->select(['resolves', 'host'])->from(Hosts::TABLE)->where(['host' => $hosts])->pairs() : [];
         $resolves = array_flip(array_keys(array_filter($resolves, fn($value) => !$value)));
 
+        $hashes = [];
+        foreach ($links as $link) {
+            if ($link['kind'] === LinkParser::KIND_EXTERNAL && $link['host'] !== null) {
+                $hashes[] = sha1(LinkParser::normalizeUrl($link['url']));
+            }
+        }
+        $external = LinkChecker::getInstance()->getUrls()->reported($hashes);
+
         $rows = [];
         foreach ($links as $link) {
             $element = $elements[(int)$link['targetId']] ?? null;
+            $check = $link['kind'] === LinkParser::KIND_EXTERNAL && $link['host'] !== null
+                ? ($external[sha1(LinkParser::normalizeUrl($link['url']))] ?? null)
+                : null;
             $site = $sites[$link['targetId'] . ':' . $link['targetSiteId']] ?? null;
             $rows[] = array_merge($link, [
                 'sourceId' => $pageId,
@@ -224,6 +243,9 @@ class Report extends Component
                 'targetPostDate' => $element['postDate'] ?? null,
                 'targetExpiryDate' => $element['expiryDate'] ?? null,
                 'hostResolves' => isset($link['host']) && isset($resolves[$link['host']]) ? false : null,
+                'externalStatus' => $check['status'] ?? null,
+                'externalCode' => $check['httpCode'] ?? null,
+                'externalFinalUrl' => $check['finalUrl'] ?? null,
             ]);
         }
         return $this->judge($rows, [$pageId . ':' . $siteId => array_fill_keys($pageAnchors, true)]);
@@ -271,9 +293,10 @@ class Report extends Component
             }
         }
 
+        $ignores = LinkChecker::getInstance()->getIgnores();
         $result = [];
         foreach ($rows as $i => $row) {
-            if (!isset($problems[$i])) {
+            if (!isset($problems[$i]) || $ignores->isIgnored((string)$row['url'])) {
                 continue;
             }
             $row['reason'] = $problems[$i];
@@ -298,6 +321,8 @@ class Report extends Component
             'page-not-found' => Craft::t('link-checker', 'Page not found'),
             'redirected' => Craft::t('link-checker', 'Redirected: better to link to the page itself'),
             'domain-not-found' => Craft::t('link-checker', 'The website’s domain doesn’t exist'),
+            'external-not-found' => Craft::t('link-checker', 'The page doesn’t exist any more'),
+            'moved-permanently' => Craft::t('link-checker', 'Moved permanently: update the link'),
             'anchor-missing' => Craft::t('link-checker', 'Anchor not found on the page'),
             'pending' => Craft::t('link-checker', 'Not published yet'),
             'deleted-fallback' => Craft::t('link-checker', 'Deleted, but the link still works through its saved URL'),
@@ -348,9 +373,18 @@ class Report extends Component
                 default => null,
             };
         }
-        if ($row['kind'] === LinkParser::KIND_EXTERNAL && $row['hostResolves'] !== null && !$row['hostResolves']
-            && LinkChecker::getInstance()->getSettings()->checkDomains) {
-            return 'domain-not-found';
+        if ($row['kind'] === LinkParser::KIND_EXTERNAL) {
+            $settings = LinkChecker::getInstance()->getSettings();
+            if ($row['hostResolves'] !== null && !$row['hostResolves'] && $settings->checkDomains) {
+                return 'domain-not-found';
+            }
+            if ($settings->checkExternal && ($row['externalStatus'] ?? null) === Urls::BROKEN) {
+                return 'external-not-found';
+            }
+            if ($settings->checkExternal && ($row['externalStatus'] ?? null) === Urls::REDIRECT) {
+                return 'moved-permanently';
+            }
+            return null;
         }
         if ($row['kind'] === LinkParser::KIND_URL) {
             if ($row['issue'] === 'route') {

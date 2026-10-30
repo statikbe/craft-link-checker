@@ -1,0 +1,107 @@
+{# Utilities → Link Checker (src/utilities/LinkCheckerUtility.php): problems, total, filters, sites, ignored #}
+{% import '_includes/forms' as forms %}
+{% set exportUrl = actionUrl('link-checker/utility/export', filters|filter(v => v)) %}
+
+<form method="get" class="flex" style="flex-wrap: wrap; gap: 12px; align-items: end; margin-bottom: 18px;">
+    {{ forms.selectField({
+        label: 'Show'|t('link-checker'),
+        name: 'severity',
+        value: filters.severity,
+        options: [
+            { label: 'Broken links'|t('link-checker'), value: 'broken' },
+            { label: 'Warnings'|t('link-checker'), value: 'warning' },
+            { label: 'Everything'|t('link-checker'), value: 'all' },
+        ],
+    }) }}
+    {% if multiSite %}
+        {{ forms.selectField({
+            label: 'Site'|t('app'),
+            name: 'siteId',
+            value: filters.siteId,
+            options: [{ label: 'All sites'|t('app'), value: 0 }]|merge(sites|map(s => { label: s.name, value: s.id })),
+        }) }}
+    {% endif %}
+    {{ forms.textField({
+        label: 'Search'|t('app'),
+        name: 'q',
+        value: filters.q,
+        placeholder: 'Page, link or location'|t('link-checker'),
+    }) }}
+    <div class="field">
+        <button type="submit" class="btn">{{ 'Filter'|t('link-checker') }}</button>
+        <a class="btn" href="{{ exportUrl }}" data-icon="download">{{ 'Export CSV'|t('link-checker') }}</a>
+    </div>
+</form>
+
+{% if not checkExternal %}
+    <p class="light">{{ 'Of external links only the domain is checked (checkExternal is off).'|t('link-checker') }}</p>
+{% endif %}
+
+{% if problems is empty %}
+    <p class="light">{{ 'No links found with these filters.'|t('link-checker') }}</p>
+{% else %}
+    <p class="light">{{ '{count, plural, =1{# link} other{# links}}'|t('link-checker', { count: total }) }}{% if total > problems|length %} · {{ 'the first {count} are shown, the export has them all'|t('link-checker', { count: problems|length }) }}{% endif %}</p>
+    <div class="tableview">
+        <table class="data fullwidth">
+            <thead>
+                <tr>
+                    <th scope="col">{{ 'Page'|t('link-checker') }}</th>
+                    {% if multiSite %}<th scope="col">{{ 'Site'|t('app') }}</th>{% endif %}
+                    <th scope="col">{{ 'Link'|t('link-checker') }}</th>
+                    <th scope="col">{{ 'Problem'|t('link-checker') }}</th>
+                    <th scope="col">{{ 'Where'|t('link-checker') }}</th>
+                    <th scope="col"><span class="visually-hidden">{{ 'Actions'|t('app') }}</span></th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for problem in problems %}
+                    <tr>
+                        <td>{% if problem.editUrl %}<a href="{{ problem.editUrl }}">{{ problem.sourceTitle }}</a>{% else %}{{ problem.sourceTitle }}{% endif %}</td>
+                        {% if multiSite %}<td>{{ problem.site }}</td>{% endif %}
+                        <td style="max-width: 320px; overflow-wrap: anywhere;">
+                            {{ problem.label ?? problem.targetTitle ?? problem.url }}
+                            {% if problem.label and problem.kind == 'external' %}<div class="light smalltext">{{ problem.url }}</div>{% endif %}
+                        </td>
+                        <td><span class="{{ problem.severity == 'broken' ? 'error' : 'notice' }}">{{ problem.reasonLabel }}</span></td>
+                        <td class="light">{{ problem.location }}</td>
+                        <td>
+                            <form method="post" accept-charset="UTF-8">
+                                {{ csrfInput() }}
+                                {{ actionInput('link-checker/utility/ignore') }}
+                                {{ hiddenInput('url', problem.url) }}
+                                {{ redirectInput(craft.app.request.url) }}
+                                <button type="submit" class="btn small">{{ 'Ignore'|t('link-checker') }}</button>
+                            </form>
+                        </td>
+                    </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+{% endif %}
+
+<hr>
+<h2>{{ 'Ignored links'|t('link-checker') }}</h2>
+{% if ignored is empty %}
+    <p class="light">{{ 'No links are ignored. Ignore a link here or in the Links panel of a page: it’s no longer reported anywhere.'|t('link-checker') }}</p>
+{% else %}
+    <table class="data fullwidth">
+        <tbody>
+            {% for item in ignored %}
+                <tr>
+                    <td style="overflow-wrap: anywhere;">{{ item.url }}</td>
+                    <td class="light">{{ item.user ?? '' }} · {{ item.dateCreated|date('short') }}</td>
+                    <td>
+                        <form method="post" accept-charset="UTF-8">
+                            {{ csrfInput() }}
+                            {{ actionInput('link-checker/utility/unignore') }}
+                            {{ hiddenInput('id', item.id) }}
+                            {{ redirectInput(craft.app.request.url) }}
+                            <button type="submit" class="btn small">{{ 'Stop ignoring'|t('link-checker') }}</button>
+                        </form>
+                    </td>
+                </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+{% endif %}

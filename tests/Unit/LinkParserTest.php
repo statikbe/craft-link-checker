@@ -69,3 +69,16 @@ it('finds the anchors HTML defines and the anchor of a suffix', function() {
         ->and(LinkParser::fragment('#!/route'))->toBeNull()
         ->and(LinkParser::fragment(null))->toBeNull();
 });
+
+it('normalizes external URLs: no fragment, lowercase scheme and host, a path', function() {
+    expect(LinkParser::normalizeUrl('HTTPS://Example.ORG/Page?a=1#top'))->toBe('https://example.org/Page?a=1')
+        ->and(LinkParser::normalizeUrl('https://example.org'))->toBe('https://example.org/')
+        ->and(LinkParser::classify('https://www.statik.be/team', 1, [['id' => 1, 'baseUrl' => 'https://example.be/']])['host'])->toBe('www.statik.be');
+});
+
+it('compares URLs without the scheme, www. and a trailing slash', function() {
+    expect(LinkParser::comparableUrl('http://statik.be'))->toBe(LinkParser::comparableUrl('https://www.statik.be/'))
+        ->and(LinkParser::comparableUrl('https://example.org/a/'))->toBe(LinkParser::comparableUrl('https://example.org/a'))
+        ->and(LinkParser::comparableUrl('https://example.org/old'))->not->toBe(LinkParser::comparableUrl('https://example.org/new'))
+        ->and(LinkParser::comparableUrl('https://example.org/?a=1'))->not->toBe(LinkParser::comparableUrl('https://example.org/?a=2'));
+});

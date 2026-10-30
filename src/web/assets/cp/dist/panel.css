@@ -110,3 +110,23 @@
   margin: 10px 0 0;
   font-size: 12px;
 }
+
+.lc-panel__ignore {
+  flex: none;
+  align-self: start;
+  margin-inline-start: auto;
+  padding: 0 4px;
+  border: 0;
+  background: none;
+  color: var(--light-text-color, #606d7b);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  opacity: 0;
+}
+
+.lc-panel__item:hover .lc-panel__ignore,
+.lc-panel__ignore:focus-visible {
+  opacity: 1;
+  text-decoration: underline;
+}

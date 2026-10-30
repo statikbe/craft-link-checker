@@ -23,9 +23,12 @@ class RebuildController extends Controller
     /** @var bool Push a queue job instead of reading the pages now */
     public bool $queue = false;
 
+    /** @var bool Don't check the external pages (only read the links and look up the domains) */
+    public bool $skipExternal = false;
+
     public function options($actionID): array
     {
-        return array_merge(parent::options($actionID), ['queue']);
+        return array_merge(parent::options($actionID), ['queue', 'skipExternal']);
     }
 
     public function actionIndex(): int
@@ -61,6 +64,14 @@ class RebuildController extends Controller
                 if (!$ok) {
                     $this->stderr("DNS lookups fail here (also for " . \statikbe\linkchecker\services\Hosts::CANARY . "): the domains weren't checked.\n", Console::FG_YELLOW);
                 }
+            }
+        }
+        if ($plugin->getSettings()->checkExternal && !$this->skipExternal) {
+            $due = $plugin->getUrls()->due();
+            if ($due) {
+                Console::startProgress(0, count($due), 'Checking external links: ');
+                $plugin->getUrls()->check($due, fn(int $done, int $total) => Console::updateProgress($done, $total));
+                Console::endProgress();
             }
         }
         $this->stdout("\n");
