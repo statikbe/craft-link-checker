@@ -19,8 +19,9 @@ class Checker extends Component
     private array $nestedErrors = [];
 
     /**
-     * After an entry is validated (Entry::EVENT_AFTER_VALIDATE). Only in the live scenario of a web request (publishing): not
-     * for drafts, autosaves, propagation to other sites, resaving or console commands.
+     * After an entry is validated (Entry::EVENT_AFTER_VALIDATE). Only in the live scenario of a control panel request
+     * (publishing): not for drafts, autosaves, propagation to other sites, resaving, console commands, front-end entry forms
+     * or GraphQL.
      */
     public function check(Entry $entry): void
     {
@@ -43,7 +44,7 @@ class Checker extends Component
             || $entry->propagating
             || $entry->resaving
             || $entry->getIsRevision()
-            || Craft::$app->getRequest()->getIsConsoleRequest()
+            || !Craft::$app->getRequest()->getIsCpRequest()
         ) {
             return;
         }

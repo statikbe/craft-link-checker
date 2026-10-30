@@ -14,7 +14,7 @@
                         <span class="lc-panel__why">{{ problem.reasonLabel }}</span>
                         <span class="lc-panel__where">{{ problem.location }}</span>
                     </span>
-                    <button type="button" class="lc-panel__ignore" data-ignore="{{ problem.url }}" data-page-id="{{ pageId }}" title="{{ 'Ignore this link everywhere'|t('link-checker') }}" aria-label="{{ 'Ignore this link everywhere'|t('link-checker') }}">{{ 'Ignore'|t('link-checker') }}</button>
+                    <button type="button" class="lc-panel__ignore" data-ignore="{{ problem.url }}" data-element-id="{{ elementId }}" data-site-id="{{ siteId }}" title="{{ 'Ignore this link everywhere'|t('link-checker') }}" aria-label="{{ 'Ignore this link everywhere'|t('link-checker') }}">{{ 'Ignore'|t('link-checker') }}</button>
                 </li>
             {% endfor %}
         </ul>

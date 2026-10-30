@@ -10,7 +10,14 @@ use craft\helpers\Queue;
 use GuzzleHttp\Client;
 use GuzzleHttp\Exception\ConnectException;
 use GuzzleHttp\Exception\RequestException;
+use GuzzleHttp\Handler\CurlHandler;
+use GuzzleHttp\HandlerStack;
+use GuzzleHttp\TransferStats;
+use Psr\Http\Message\ResponseInterface;
+use statikbe\linkchecker\helpers\AddressPolicy;
+use statikbe\linkchecker\helpers\HeadersReceived;
 use statikbe\linkchecker\helpers\LinkParser;
+use statikbe\linkchecker\helpers\UnpinnedException;
 use statikbe\linkchecker\jobs\CheckUrlsJob;
 use statikbe\linkchecker\LinkChecker;
 
@@ -19,8 +26,8 @@ use statikbe\linkchecker\LinkChecker;
  *
  * - Each URL once, however many pages link to it (keyed by the sha1 of the normalized URL).
  * - HEAD first, a GET (without reading the body) when a server doesn't answer HEAD properly.
- * - Redirects are followed by hand (at most 5), so every step is checked: only http(s) on ports 80 and 443, and never an
- *   address in a private or reserved range (the address that was checked is the one connected to).
+ * - Redirects are followed by hand (at most 5), so every step is checked: only http(s) on ports 80 and 443, and never a host
+ *   with an address that isn't public (AddressPolicy). Every request goes through curl, pinned to the checked address.
  * - One request at a time, with hostDelay between two requests to the same host.
  * - 404 or 410: a failure. failuresBeforeBroken failures in a row, at least an hour apart, make the link broken.
  * - A permanent redirect (301, 308) to a page that works: a warning, update the link. Not when it only changes http to https,
@@ -40,7 +47,10 @@ class Urls extends Component
 
     private const MAX_REDIRECTS = 5;
 
-    private bool $queued = false;
+    /** A failure only counts when the previous check was at least this long ago (seconds; the retry comes after an hour ±10%) */
+    private const FAILURE_INTERVAL = 2700;
+
+    private const QUEUED_KEY = 'linkchecker:urls-queued';
 
     private ?Client $client = null;
 
@@ -48,57 +58,80 @@ class Urls extends Component
     private array $lastRequest = [];
 
     /**
-     * The external URLs that weren't checked yet or are due again: [['urlHash', 'url', 'host'], …]. Only URLs whose domain
-     * exists (Hosts), not of skipped hosts.
+     * The external URLs that weren't checked yet or are due again: [['urlHash', 'url', 'host'], …]. Not of skipped hosts, and
+     * when domains are checked (checkDomains), only URLs whose domain exists.
      *
      * @return array<array{urlHash: string, url: string, host: string}>
      */
     public function due(bool $all = false): array
     {
+        $settings = LinkChecker::getInstance()->getSettings();
         $now = Db::prepareDateForDb(new \DateTime());
         $query = (new Query())
             ->select(['l.urlHash', 'url' => 'min([[l.url]])', 'host' => 'min([[l.host]])'])
             ->from(['l' => Index::TABLE])
-            ->innerJoin(['h' => Hosts::TABLE], '[[h.host]] = [[l.host]]')
+            ->leftJoin(['h' => Hosts::TABLE], '[[h.host]] = [[l.host]]')
             ->leftJoin(['u' => self::TABLE], '[[u.urlHash]] = [[l.urlHash]]')
-            ->where(['l.kind' => LinkParser::KIND_EXTERNAL, 'h.resolves' => true])
+            ->where(['l.kind' => LinkParser::KIND_EXTERNAL])
             ->andWhere(['not', ['l.urlHash' => null]])
+            // Domains are looked up first; without that check, a domain that was never looked up counts as existing
+            ->andWhere($settings->checkDomains ? ['h.resolves' => true] : ['or', ['h.id' => null], ['h.resolves' => true]])
             ->groupBy(['l.urlHash']);
         if (!$all) {
             $query->andWhere(['or', ['u.id' => null], ['<=', 'u.nextCheckAt', $now]]);
         }
-        $settings = LinkChecker::getInstance()->getSettings();
         return array_values(array_filter($query->all(), fn(array $row) => !$settings->skipsHost((string)$row['host'])));
     }
 
     /**
-     * Pushes a queue job when URLs are due (once per request).
+     * Pushes a queue job when URLs are due, unless one is waiting already (it checks every URL that's due when it starts).
      */
     public function queueIfDue(): void
     {
-        if ($this->queued || !LinkChecker::getInstance()->getSettings()->checkExternal) {
+        $cache = Craft::$app->getCache();
+        if (!LinkChecker::getInstance()->getSettings()->checkExternal || $cache->exists(self::QUEUED_KEY)) {
             return;
         }
-        if ($this->due()) {
+        if ($this->due() && $cache->add(self::QUEUED_KEY, true, 3600)) {
             Queue::push(new CheckUrlsJob());
-            $this->queued = true;
         }
     }
 
     /**
-     * Checks these URLs and stores the results.
+     * A job started: the next save may push another one.
+     */
+    public function jobStarted(): void
+    {
+        Craft::$app->getCache()->delete(self::QUEUED_KEY);
+    }
+
+    /**
+     * Checks these URLs and stores the results. A URL that was checked since it became due (by another job) is skipped,
+     * unless $force.
      *
      * @param array<array{urlHash: string, url: string, host: string}> $items
      * @param callable|null $progress function(int $done, int $total)
      */
-    public function check(array $items, ?callable $progress = null): void
+    public function check(array $items, ?callable $progress = null, bool $force = false): void
     {
-        foreach (array_values($items) as $i => $item) {
-            $this->store($item, $this->request(LinkParser::normalizeUrl($item['url'])));
+        $items = array_values($items);
+        foreach ($items as $i => $item) {
+            if ($force || $this->isDue($item['urlHash'])) {
+                $this->store($item, $this->request(LinkParser::normalizeUrl($item['url'])));
+            }
             if ($progress) {
                 $progress($i + 1, count($items));
             }
         }
+    }
+
+    /**
+     * Whether a URL wasn't checked yet or is due again.
+     */
+    public function isDue(string $urlHash): bool
+    {
+        $next = (new Query())->select(['nextCheckAt'])->from(self::TABLE)->where(['urlHash' => $urlHash])->scalar();
+        return $next === false || $next === null || $next <= Db::prepareDateForDb(new \DateTime());
     }
 
     /**
@@ -111,7 +144,7 @@ class Urls extends Component
         $permanent = false;
         $current = $url;
         for ($hop = 0; $hop <= self::MAX_REDIRECTS; $hop++) {
-            $target = $this->safeTarget($current);
+            $target = AddressPolicy::target($current, [AddressPolicy::class, 'resolve']);
             if (is_string($target)) {
                 return $this->result(self::UNKNOWN, null, $target, $current);
             }
@@ -121,6 +154,8 @@ class Urls extends Component
                 if (in_array($response->getStatusCode(), [400, 403, 405, 500, 501], true)) {
                     $response = $this->send('GET', $current, $target);
                 }
+            } catch (UnpinnedException) {
+                return $this->result(self::UNKNOWN, null, 'unpinned', $current);
             } catch (ConnectException $e) {
                 $timeout = str_contains(strtolower($e->getMessage()), 'timed out');
                 return $this->result(self::UNKNOWN, null, $timeout ? 'timeout' : 'connection', $current);
@@ -174,19 +209,34 @@ class Urls extends Component
     }
 
     /**
+     * The failures in a row after one more 404/410: only counted when the previous check was long enough ago, so two checks
+     * close together (two jobs, a deploy) don't make a link broken.
+     *
+     * @param string|null $previousCheck the previous check's date (UTC, as stored)
+     */
+    public static function failures(int $failures, ?string $previousCheck, int $now): int
+    {
+        if ($failures === 0 || $previousCheck === null) {
+            return $failures + 1;
+        }
+        $previous = strtotime($previousCheck . ' UTC');
+        return $previous !== false && $now - $previous >= self::FAILURE_INTERVAL ? $failures + 1 : $failures;
+    }
+
+    /**
      * @param array{urlHash: string, url: string, host: string} $item
      * @param array{status: string, httpCode: int|null, error: string|null, finalUrl: string|null} $result
      */
     private function store(array $item, array $result): void
     {
         $settings = LinkChecker::getInstance()->getSettings();
-        $previous = (new Query())->select(['failures'])->from(self::TABLE)->where(['urlHash' => $item['urlHash']])->scalar();
-        $failures = (int)$previous;
+        $previous = (new Query())->select(['failures', 'checkedAt'])->from(self::TABLE)->where(['urlHash' => $item['urlHash']])->one();
+        $failures = (int)($previous['failures'] ?? 0);
         $status = $result['status'];
         $next = 'P7D';
 
         if ($status === self::FAILING) {
-            $failures++;
+            $failures = self::failures($failures, $previous['checkedAt'] ?? null, time());
             if ($failures >= $settings->failuresBeforeBroken) {
                 $status = self::BROKEN;
                 $next = 'P1D';
@@ -219,39 +269,14 @@ class Urls extends Component
     }
 
     /**
-     * Where to connect for a URL: [host, port, ip], or a reason not to request it.
+     * One request, connected to the address that was checked (CURLOPT_RESOLVE), always through curl. The body of a GET isn't
+     * read: the request stops once the headers are in. A response from another address (a proxy, a pin that didn't apply)
+     * isn't used.
      *
-     * @return array{0: string, 1: int, 2: string}|string
-     */
-    private function safeTarget(string $url): array|string
-    {
-        $parts = parse_url($url);
-        $scheme = strtolower($parts['scheme'] ?? '');
-        $host = strtolower($parts['host'] ?? '');
-        if (!in_array($scheme, ['http', 'https'], true) || $host === '') {
-            return 'not-http';
-        }
-        $port = (int)($parts['port'] ?? ($scheme === 'https' ? 443 : 80));
-        if (!in_array($port, [80, 443], true)) {
-            return 'port';
-        }
-        $ascii = function_exists('idn_to_ascii') ? (idn_to_ascii($host, IDNA_DEFAULT, INTL_IDNA_VARIANT_UTS46) ?: $host) : $host;
-        $ips = filter_var($ascii, FILTER_VALIDATE_IP) ? [$ascii] : (gethostbynamel($ascii) ?: []);
-        if (!$ips) {
-            return 'dns';
-        }
-        foreach ($ips as $ip) {
-            if (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE) === false) {
-                return 'private-address';
-            }
-        }
-        return [$ascii, $port, $ips[0]];
-    }
-
-    /**
      * @param array{0: string, 1: int, 2: string} $target
+     * @throws UnpinnedException
      */
-    private function send(string $method, string $url, array $target): \Psr\Http\Message\ResponseInterface
+    private function send(string $method, string $url, array $target): ResponseInterface
     {
         [$host, $port, $ip] = $target;
         $wait = ($this->lastRequest[$host] ?? 0) + LinkChecker::getInstance()->getSettings()->hostDelay / 1000 - microtime(true);
@@ -260,11 +285,53 @@ class Urls extends Component
         }
         $this->lastRequest[$host] = microtime(true);
 
-        return $this->client()->request($method, $url, [
-            'stream' => $method === 'GET',
-            // Connect to the address that was checked, not to one a second DNS lookup might give
-            'curl' => [CURLOPT_RESOLVE => ["$host:$port:$ip"]],
-        ]);
+        $connected = null;
+        $headers = null;
+        $options = self::requestOptions($method, $target, function(?string $primaryIp) use (&$connected) {
+            $connected = $primaryIp;
+        }, function(ResponseInterface $response) use (&$headers) {
+            $headers = $response;
+        });
+        try {
+            $response = $this->client()->request($method, $url, $options);
+        } catch (RequestException $e) {
+            if (!$e->getPrevious() instanceof HeadersReceived || $headers === null) {
+                throw $e;
+            }
+            $response = $headers;
+        }
+        if (!AddressPolicy::sameAddress($connected, $ip)) {
+            throw new UnpinnedException();
+        }
+        return $response;
+    }
+
+    /**
+     * The options of one request: pinned to the checked address, without streaming (which would bypass curl), and for a GET
+     * stopped once the headers are in.
+     *
+     * @param array{0: string, 1: int, 2: string} $target
+     * @param callable(string|null): void $onConnected gets the address the request connected to
+     * @param callable(ResponseInterface): void $onHeaders gets the response of a GET before its body
+     * @return array<string, mixed>
+     */
+    public static function requestOptions(string $method, array $target, callable $onConnected, callable $onHeaders): array
+    {
+        [$host, $port, $ip] = $target;
+        $options = [
+            // An IP address in the URL needs no pin: curl connects to it
+            'curl' => filter_var(trim($host, '[]'), FILTER_VALIDATE_IP) ? [] : [CURLOPT_RESOLVE => [AddressPolicy::pin($host, $port, $ip)]],
+            'on_stats' => function(TransferStats $stats) use ($onConnected) {
+                $onConnected($stats->getHandlerStats()['primary_ip'] ?? null);
+            },
+        ];
+        if ($method === 'GET') {
+            $options['on_headers'] = function(ResponseInterface $response) use ($onHeaders) {
+                $onHeaders($response);
+                throw new HeadersReceived();
+            };
+        }
+        return $options;
     }
 
     private function client(): Client
@@ -272,18 +339,29 @@ class Urls extends Component
         if ($this->client === null) {
             $settings = LinkChecker::getInstance()->getSettings();
             $site = Craft::$app->getSites()->getPrimarySite()->getBaseUrl() ?? '';
-            $this->client = Craft::createGuzzleClient([
-                'timeout' => $settings->timeout,
-                'connect_timeout' => min(5, $settings->timeout),
-                'allow_redirects' => false,
-                'http_errors' => false,
-                'headers' => [
-                    'User-Agent' => 'StatikLinkChecker/1.2 (+' . $site . ')',
-                    'Accept' => 'text/html,application/xhtml+xml,*/*;q=0.8',
-                ],
-            ]);
+            $this->client = self::createClient($settings->timeout, 'StatikLinkChecker/' . LinkChecker::getInstance()->getVersion() . ' (+' . $site . ')');
         }
         return $this->client;
+    }
+
+    /**
+     * A client that sends every request through curl (Guzzle's stream handler ignores CURLOPT_RESOLVE), without a proxy and
+     * without following redirects (each step is checked).
+     */
+    public static function createClient(int $timeout, string $userAgent): Client
+    {
+        return new Client([
+            'handler' => HandlerStack::create(new CurlHandler()),
+            'timeout' => $timeout,
+            'connect_timeout' => min(5, $timeout),
+            'allow_redirects' => false,
+            'http_errors' => false,
+            'proxy' => '',
+            'headers' => [
+                'User-Agent' => $userAgent,
+                'Accept' => 'text/html,application/xhtml+xml,*/*;q=0.8',
+            ],
+        ]);
     }
 
     /**

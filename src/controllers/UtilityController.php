@@ -36,7 +36,7 @@ class UtilityController extends Controller
         foreach ($problems as $problem) {
             $key = $problem['sourceId'] . '-' . $problem['siteId'];
             $editUrls[$key] ??= $plugin->getReport()->editUrl((int)$problem['sourceId'], (int)$problem['siteId']);
-            fputcsv($handle, [
+            fputcsv($handle, array_map([self::class, 'csvCell'], [
                 $problem['sourceTitle'],
                 $sites->getSiteById((int)$problem['siteId'], true)?->getName() ?? '',
                 $editUrls[$key],
@@ -45,7 +45,7 @@ class UtilityController extends Controller
                 $problem['targetTitle'] ?? $problem['url'],
                 $problem['severity'],
                 Report::reasonLabel((string)$problem['reason']),
-            ], escape: '');
+            ]), escape: '');
         }
         rewind($handle);
         $csv = stream_get_contents($handle);
@@ -55,7 +55,17 @@ class UtilityController extends Controller
     }
 
     /**
-     * Ignores a link everywhere. From the utility, or from the Links panel of a page the user may edit.
+     * A CSV cell that a spreadsheet doesn't run as a formula: text starting with = + - @ or a tab or return gets a quote.
+     */
+    public static function csvCell(mixed $value): string
+    {
+        $value = (string)$value;
+        return $value !== '' && in_array($value[0], ['=', '+', '-', '@', "\t", "\r"], true) ? "'" . $value : $value;
+    }
+
+    /**
+     * Ignores a link everywhere. From the utility, or from the Links panel: only a link that's on the entry the user edits
+     * (and may save).
      */
     public function actionIgnore(): ?Response
     {
@@ -63,11 +73,19 @@ class UtilityController extends Controller
         $this->requirePostRequest();
         $user = Craft::$app->getUser()->getIdentity();
         $url = (string)$this->request->getRequiredBodyParam('url');
-        $pageId = $this->request->getBodyParam('pageId');
+        $elementId = (int)$this->request->getBodyParam('elementId');
         $allowed = $user?->can('utility:link-checker');
-        if (!$allowed && $pageId) {
-            $page = Entry::find()->id((int)$pageId)->drafts(null)->provisionalDrafts(null)->status(null)->one();
-            $allowed = $page !== null && Craft::$app->getElements()->canSave($page);
+        if (!$allowed && $elementId) {
+            $entry = Entry::find()
+                ->id($elementId)
+                ->siteId((int)$this->request->getRequiredBodyParam('siteId'))
+                ->drafts(null)
+                ->provisionalDrafts(null)
+                ->status(null)
+                ->one();
+            $allowed = $entry !== null
+                && Craft::$app->getElements()->canSave($entry)
+                && in_array(trim($url), array_map(fn(array $link) => trim((string)$link['url']), LinkChecker::getInstance()->getExtractor()->extract($entry)['links']), true);
         }
         if (!$allowed) {
             throw new ForbiddenHttpException('Not allowed to ignore links.');

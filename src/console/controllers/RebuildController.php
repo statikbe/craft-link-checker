@@ -43,8 +43,14 @@ class RebuildController extends Controller
         $ids = RebuildJob::ids();
         $total = count($ids);
         Console::startProgress(0, $total, 'Reading the links of every page: ');
+        $failed = [];
         foreach ($ids as $i => $id) {
-            $index->index((int)$id);
+            try {
+                $index->index((int)$id);
+            } catch (\Throwable $e) {
+                $failed[$id] = $e->getMessage();
+                Craft::error("Couldn't read the links of element {$id}: {$e->getMessage()}", __METHOD__);
+            }
             if ($i % 50 === 0) {
                 Craft::$app->getElements()->invalidateAllCaches();
                 gc_collect_cycles();
@@ -53,6 +59,9 @@ class RebuildController extends Controller
         }
         Console::endProgress();
         $this->stdout("$total pages read.\n", Console::FG_GREEN);
+        foreach ($failed as $id => $message) {
+            $this->stderr("Couldn't read element $id: $message\n", Console::FG_RED);
+        }
 
         $plugin = LinkChecker::getInstance();
         if ($plugin->getSettings()->checkDomains) {

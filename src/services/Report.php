@@ -10,6 +10,7 @@ use craft\elements\User;
 use craft\helpers\Db;
 use statikbe\linkchecker\helpers\LinkParser;
 use statikbe\linkchecker\LinkChecker;
+use statikbe\linkchecker\models\Settings;
 
 /**
  * Which links are broken, worked out from the targets' current state each time the report is read (deleted, in the trash,
@@ -211,8 +212,7 @@ class Report extends Component
         }
 
         $hosts = array_values(array_unique(array_filter(array_column($links, 'host'))));
-        $resolves = $hosts ? (new Query())->select(['resolves', 'host'])->from(Hosts::TABLE)->where(['host' => $hosts])->pairs() : [];
-        $resolves = array_flip(array_keys(array_filter($resolves, fn($value) => !$value)));
+        $unresolved = $hosts ? self::unresolvedHosts((new Query())->select(['host', 'resolves'])->from(Hosts::TABLE)->where(['host' => $hosts])->all()) : [];
 
         $hashes = [];
         foreach ($links as $link) {
@@ -229,26 +229,57 @@ class Report extends Component
                 ? ($external[sha1(LinkParser::normalizeUrl($link['url']))] ?? null)
                 : null;
             $site = $sites[$link['targetId'] . ':' . $link['targetSiteId']] ?? null;
-            $rows[] = array_merge($link, [
-                'sourceId' => $pageId,
-                'siteId' => $siteId,
-                'targetElementId' => $element['id'] ?? null,
-                'targetDeleted' => $element['dateDeleted'] ?? null,
-                'targetEnabled' => $element['enabled'] ?? null,
-                'targetArchived' => $element['archived'] ?? null,
-                'targetSiteRow' => $site['id'] ?? null,
-                'targetSiteEnabled' => $site['enabled'] ?? null,
-                'targetUri' => $site['uri'] ?? null,
-                'targetTitle' => $site['title'] ?? null,
-                'targetPostDate' => $element['postDate'] ?? null,
-                'targetExpiryDate' => $element['expiryDate'] ?? null,
-                'hostResolves' => isset($link['host']) && isset($resolves[$link['host']]) ? false : null,
-                'externalStatus' => $check['status'] ?? null,
-                'externalCode' => $check['httpCode'] ?? null,
-                'externalFinalUrl' => $check['finalUrl'] ?? null,
-            ]);
+            $rows[] = self::stateRow($link, $pageId, $siteId, $element, $site, isset($link['host']) && isset($unresolved[$link['host']]), $check);
         }
         return $this->judge($rows, [$pageId . ':' . $siteId => array_fill_keys($pageAnchors, true)]);
+    }
+
+    /**
+     * The domains that don't exist, from rows of the hosts table: [host => true].
+     *
+     * @param array<array{host: string, resolves: mixed}> $rows
+     * @return array<string, true>
+     */
+    public static function unresolvedHosts(array $rows): array
+    {
+        $unresolved = [];
+        foreach ($rows as $row) {
+            if (!$row['resolves']) {
+                $unresolved[(string)$row['host']] = true;
+            }
+        }
+        return $unresolved;
+    }
+
+    /**
+     * A link as it's edited with its target's current state, in the shape of a row of the report's query.
+     *
+     * @param array<string, mixed> $link a link record from the Extractor
+     * @param array<string, mixed>|null $element the target element (elements + entries columns)
+     * @param array<string, mixed>|null $site the target's row in elements_sites, in the link's site
+     * @param array<string, mixed>|null $check the last check of the external page (Urls::reported())
+     * @return array<string, mixed>
+     */
+    public static function stateRow(array $link, int $pageId, int $siteId, ?array $element, ?array $site, bool $hostUnresolved, ?array $check): array
+    {
+        return array_merge($link, [
+            'sourceId' => $pageId,
+            'siteId' => $siteId,
+            'targetElementId' => $element['id'] ?? null,
+            'targetDeleted' => $element['dateDeleted'] ?? null,
+            'targetEnabled' => $element['enabled'] ?? null,
+            'targetArchived' => $element['archived'] ?? null,
+            'targetSiteRow' => $site['id'] ?? null,
+            'targetSiteEnabled' => $site['enabled'] ?? null,
+            'targetUri' => $site['uri'] ?? null,
+            'targetTitle' => $site['title'] ?? null,
+            'targetPostDate' => $element['postDate'] ?? null,
+            'targetExpiryDate' => $element['expiryDate'] ?? null,
+            'hostResolves' => $hostUnresolved ? false : null,
+            'externalStatus' => $check['status'] ?? null,
+            'externalCode' => $check['httpCode'] ?? null,
+            'externalFinalUrl' => $check['finalUrl'] ?? null,
+        ]);
     }
 
     /**
@@ -262,7 +293,6 @@ class Report extends Component
     {
         $now = Db::prepareDateForDb(new \DateTime());
         $settings = LinkChecker::getInstance()->getSettings();
-        $crossSite = $settings->crossSiteLinks === 'warning';
         $live = $this->liveUris(array_merge(
             array_filter($rows, fn(array $row) => $row['kind'] === LinkParser::KIND_URL),
             array_map(
@@ -275,7 +305,7 @@ class Report extends Component
         $problems = [];
         $anchorChecks = [];
         foreach ($rows as $i => $row) {
-            $reason = $this->reason($row, $live, $now, $crossSite);
+            $reason = $this->reason($row, $live, $now);
             if ($reason !== null) {
                 $problems[$i] = $reason;
             } elseif ($settings->checkAnchors && ($target = $this->anchorTarget($row, $live)) !== null) {
@@ -353,8 +383,21 @@ class Report extends Component
      * @param array<string, mixed> $row
      * @param array<string, int> $live
      */
-    private function reason(array $row, array $live, string $now, bool $crossSite): ?string
+    private function reason(array $row, array $live, string $now): ?string
     {
+        return self::reasonFor($row, $live, $now, LinkChecker::getInstance()->getSettings(), fn(array $row) => $this->redirected($row));
+    }
+
+    /**
+     * Why a link (a row with its target's state) has a problem, or null when it has none (anchors aside).
+     *
+     * @param array<string, mixed> $row
+     * @param array<string, int> $live 'siteId:uri' => element id of the live pages among the rows' URIs
+     * @param callable(array<string, mixed>): bool $redirected whether a redirect sends an own-site URL on
+     */
+    public static function reasonFor(array $row, array $live, string $now, Settings $settings, callable $redirected): ?string
+    {
+        $crossSite = $settings->crossSiteLinks === 'warning';
         if (in_array($row['kind'], LinkParser::ELEMENT_KINDS, true)) {
             // The element is gone, but Craft renders the saved fallback URL, which still leads to a live page
             $gone = $row['targetElementId'] === null || $row['targetDeleted'] !== null;
@@ -374,7 +417,6 @@ class Report extends Component
             };
         }
         if ($row['kind'] === LinkParser::KIND_EXTERNAL) {
-            $settings = LinkChecker::getInstance()->getSettings();
             if ($row['hostResolves'] !== null && !$row['hostResolves'] && $settings->checkDomains) {
                 return 'domain-not-found';
             }
@@ -393,7 +435,7 @@ class Report extends Component
             if (isset($live[$row['targetSiteId'] . ':' . strtolower((string)$row['uri'])])) {
                 return null;
             }
-            return $this->redirected($row) ? 'redirected' : 'page-not-found';
+            return $redirected($row) ? 'redirected' : 'page-not-found';
         }
         return isset(self::REASONS[$row['issue'] ?? '']) ? $row['issue'] : null;
     }

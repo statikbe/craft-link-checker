@@ -39,7 +39,7 @@ use yii\base\Event;
  */
 class LinkChecker extends Plugin
 {
-    public string $schemaVersion = '1.0.0';
+    public string $schemaVersion = '1.2.1';
 
     public static function config(): array
     {
@@ -173,7 +173,7 @@ class LinkChecker extends Plugin
     }
 
     /**
-     * @return array{problems: array<array<string, mixed>>, total: int}
+     * @return array{problems: array<array<string, mixed>>, total: int, elementId: int, siteId: int}
      */
     private function panelVariables(Entry $entry): array
     {
@@ -185,7 +185,7 @@ class LinkChecker extends Plugin
             unset($problem['element'], $problem['chain']);
         }
         unset($problem);
-        return ['problems' => $problems, 'total' => count($result['links']), 'pageId' => (int)$entry->getCanonicalId()];
+        return ['problems' => $problems, 'total' => count($result['links']), 'elementId' => (int)$entry->id, 'siteId' => (int)$entry->siteId];
     }
 
     /**

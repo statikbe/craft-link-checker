@@ -61,7 +61,7 @@
             }
             button.disabled = true;
             Craft.sendActionRequest('POST', 'link-checker/utility/ignore', {
-                data: {url: button.dataset.ignore, pageId: button.dataset.pageId},
+                data: {url: button.dataset.ignore, elementId: button.dataset.elementId, siteId: button.dataset.siteId},
             }).then(() => refresh()).catch(() => {
                 button.disabled = false;
             });

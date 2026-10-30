@@ -42,8 +42,9 @@ templates of the site, and the redirects of [SEO Fields](https://plugins.craftcm
 
 External links (to other websites) are checked in queue jobs, never in an editor's request:
 
-1. **The domain** is looked up (DNS), cached per domain: again after 7 days when it exists, after a day when it doesn't. When
-   even `example.com` can't be looked up (no network, a broken resolver) nothing is marked.
+1. **The domain** is looked up (DNS), cached per domain: again after 7 days when it exists, after a day when it doesn't. A
+   domain only counts as not existing after two failed lookups at least an hour apart. When even `example.com` can't be
+   looked up (no network, a broken resolver) nothing is marked.
 2. **The page** is requested (`checkExternal`), each URL once however many pages link to it: HEAD first, a GET when a server
    doesn't answer HEAD properly. One request at a time, with `hostDelay` between two requests to the same host.
    - 404 or 410 twice in a row, at least an hour apart (`failuresBeforeBroken`): **broken**.
@@ -52,8 +53,10 @@ External links (to other websites) are checked in queue jobs, never in an editor
    - Anything else (401, 403, 429, 5xx, a timeout, an SSL error): unknown, never reported. Sites that block link checkers
      would always look broken, so their pages aren't requested (`skipHosts`: Facebook, Instagram, LinkedIn, X, TikTok).
    - A working page is checked again after 7 days, a failing one after an hour, a broken or unknown one after a day.
-   - Redirects are followed by hand, so every step is checked: only http(s) on ports 80 and 443, never an address in a
-     private or reserved range (the server's own network, cloud metadata), and the checked address is the one connected to.
+   - Redirects are followed by hand, so every step is checked: only http(s) on ports 80 and 443, never a host with an
+     address (IPv4 or IPv6) that isn't public (the server's own network, cloud metadata, carrier-grade NAT), and the
+     checked address is the one connected to. Requests always go through curl and never through a proxy.
+   - A new job is only pushed when none is waiting; a URL another job checked in the meantime is skipped.
 
 This needs outbound HTTP from the server. Where that's not allowed, set `'checkExternal' => false` for that environment;
 the domains are still checked.
@@ -68,6 +71,9 @@ Craft CMS 5.6 or later, PHP 8.2 or later.
 composer require statikbe/craft-link-checker
 php craft plugin/install link-checker
 ```
+
+Updating from an earlier version: run `php craft up` (or the database update in the control panel). It adds the tables
+and columns of the newer version and reads the links of every page again when needed.
 
 Installing queues a job that reads every page. On a large site you can also run it yourself:
 
@@ -155,8 +161,9 @@ collapsed.
 
 With `'warn'`, publishing a page with broken links shows a warning that lists them; the page is saved. With `'block'`, it
 isn't saved: each broken link is shown where it is, on the row or block, the column (its card turns red) and the field. Only
-broken links count, never warnings, and only when an entry is published in a web request: not for drafts, autosaves,
-resaving or console commands.
+broken links count, never warnings, and only when an entry is published in the control panel: not for drafts, autosaves,
+resaving, console commands, front-end entry forms or GraphQL. Links in disabled blocks don't count: they aren't shown on
+the page.
 
 ## Utilities → Link Checker
 
@@ -166,7 +173,8 @@ filtered list. Users need Craft's permission for the utility ("Link Checker" und
 
 **Ignore** stops reporting a link everywhere it's used (by its stored value: a URL, an entry reference, a mailto:). The
 ignored links are listed at the bottom, with who ignored them and **Stop ignoring**. An editor can also ignore a link in the
-Links panel of a page they may edit.
+Links panel of a page they may edit (only a link that's on that page). In the CSV export, text that a spreadsheet would run
+as a formula starts with a quote.
 
 ## Widget
 

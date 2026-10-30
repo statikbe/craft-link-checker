@@ -242,7 +242,11 @@ class Extractor extends Component
         if (!is_iterable($value)) {
             return [];
         }
-        return array_values(array_filter(is_array($value) ? $value : iterator_to_array($value), fn($e) => $e instanceof Entry));
+        // Disabled entries aren't rendered: their links don't count (also when the posted or cached value has them)
+        return array_values(array_filter(
+            is_array($value) ? $value : iterator_to_array($value),
+            fn($e) => $e instanceof Entry && $e->enabled && $e->getEnabledForSite() !== false,
+        ));
     }
 
     /**

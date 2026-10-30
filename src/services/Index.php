@@ -137,8 +137,12 @@ class Index extends Component
             }
         }
         // New domains and external URLs are checked in queue jobs, not in the editor's request
-        LinkChecker::getInstance()->getHosts()->queueIfDue();
-        LinkChecker::getInstance()->getUrls()->queueIfDue();
+        try {
+            LinkChecker::getInstance()->getHosts()->queueIfDue();
+            LinkChecker::getInstance()->getUrls()->queueIfDue();
+        } catch (\Throwable $e) {
+            Craft::error("Couldn't queue the external link checks: {$e->getMessage()}", __METHOD__);
+        }
     }
 
     /**

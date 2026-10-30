@@ -34,7 +34,7 @@ class CheckUrlsController extends Controller
             return ExitCode::OK;
         }
         Console::startProgress(0, count($due), 'Checking external links: ');
-        $urls->check($due, fn(int $done, int $total) => Console::updateProgress($done, $total));
+        $urls->check($due, fn(int $done, int $total) => Console::updateProgress($done, $total), $this->all);
         Console::endProgress();
         $this->stdout(sprintf("%d external links checked.\n", count($due)), Console::FG_GREEN);
         return ExitCode::OK;

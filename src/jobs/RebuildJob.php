@@ -28,7 +28,12 @@ class RebuildJob extends BaseBatchedJob
 
     protected function processItem(mixed $item): void
     {
-        LinkChecker::getInstance()->getIndex()->index((int)$item);
+        // One page that can't be read doesn't stop the rebuild
+        try {
+            LinkChecker::getInstance()->getIndex()->index((int)$item);
+        } catch (\Throwable $e) {
+            Craft::error("Couldn't read the links of element {$item}: {$e->getMessage()}", __METHOD__);
+        }
     }
 
     /**

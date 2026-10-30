@@ -12,8 +12,9 @@ use statikbe\linkchecker\LinkChecker;
 
 /**
  * Whether the domains of external links exist: a DNS lookup per domain, cached (a domain that exists is checked again after
- * 7 days, one that doesn't after a day). Only in a queue job or a console command, never in an editor's request. The pages
- * themselves aren't requested.
+ * 7 days, one that doesn't after a day). A domain only counts as not existing after two failed lookups at least an hour
+ * apart: one failure can be a resolver that timed out. Only in a queue job or a console command, never in an editor's
+ * request. The pages themselves aren't requested.
  */
 class Hosts extends Component
 {
@@ -24,8 +25,12 @@ class Hosts extends Component
 
     private const RECHECK_OK = 'P7D';
     private const RECHECK_FAILED = 'P1D';
+    private const RECHECK_FIRST_FAILURE = 'PT1H';
 
-    private bool $queued = false;
+    /** Failed lookups in a row that make a domain one that doesn't exist */
+    private const FAILURES = 2;
+
+    private const QUEUED_KEY = 'linkchecker:hosts-queued';
 
     /**
      * The domains of external links that weren't looked up yet, or not for a while.
@@ -37,6 +42,7 @@ class Hosts extends Component
         $now = new \DateTime();
         $ok = Db::prepareDateForDb((clone $now)->sub(new \DateInterval(self::RECHECK_OK)));
         $failed = Db::prepareDateForDb((clone $now)->sub(new \DateInterval(self::RECHECK_FAILED)));
+        $firstFailure = Db::prepareDateForDb((clone $now)->sub(new \DateInterval(self::RECHECK_FIRST_FAILURE)));
         return (new Query())
             ->select(['l.host'])
             ->distinct()
@@ -47,52 +53,105 @@ class Hosts extends Component
             ->andWhere(['or',
                 ['h.id' => null],
                 ['and', ['h.resolves' => true], ['<', 'h.checkedAt', $ok]],
+                ['and', ['h.resolves' => true], ['>', 'h.failures', 0], ['<', 'h.checkedAt', $firstFailure]],
                 ['and', ['h.resolves' => false], ['<', 'h.checkedAt', $failed]],
             ])
             ->column();
     }
 
     /**
-     * Pushes a queue job when domains are due (once per request).
+     * Pushes a queue job when domains are due, unless one is waiting already.
      */
     public function queueIfDue(): void
     {
-        if ($this->queued || !LinkChecker::getInstance()->getSettings()->checkDomains) {
+        $cache = Craft::$app->getCache();
+        if (!LinkChecker::getInstance()->getSettings()->checkDomains || $cache->exists(self::QUEUED_KEY)) {
             return;
         }
-        if ($this->due()) {
+        if ($this->due() && $cache->add(self::QUEUED_KEY, true, 3600)) {
             Queue::push(new CheckHostsJob());
-            $this->queued = true;
         }
     }
 
     /**
+     * A job started: the next save may push another one.
+     */
+    public function jobStarted(): void
+    {
+        Craft::$app->getCache()->delete(self::QUEUED_KEY);
+    }
+
+    /**
+     * Whether DNS lookups can be trusted here: even a domain that always exists can't be looked up without a network or with
+     * a broken resolver.
+     */
+    public static function lookupsWork(): bool
+    {
+        return self::resolves(self::CANARY);
+    }
+
+    /**
      * Looks up these domains and stores the results. Returns false (and stores nothing) when the lookups can't be trusted.
+     * A domain another job looked up since it became due is skipped.
      *
      * @param string[] $hosts
      * @param callable|null $progress function(int $done, int $total)
      */
-    public function check(array $hosts, ?callable $progress = null): bool
+    public function check(array $hosts, ?callable $progress = null, bool $lookupsChecked = false): bool
     {
         if (!$hosts) {
             return true;
         }
-        if (!self::resolves(self::CANARY)) {
+        if (!$lookupsChecked && !self::lookupsWork()) {
             Craft::warning('Link Checker: DNS lookups fail (also for ' . self::CANARY . '), so no domains were checked.', __METHOD__);
             return false;
         }
-        $now = Db::prepareDateForDb(new \DateTime());
-        foreach (array_values($hosts) as $i => $host) {
-            Db::upsert(self::TABLE, [
-                'host' => $host,
-                'resolves' => self::resolves($host),
-                'checkedAt' => $now,
-            ]);
+        $hosts = array_values($hosts);
+        foreach ($hosts as $i => $host) {
+            if ($this->isDue($host)) {
+                $this->store($host, self::resolves($host));
+            }
             if ($progress) {
                 $progress($i + 1, count($hosts));
             }
         }
         return true;
+    }
+
+    /**
+     * Whether a domain wasn't looked up yet, or is due again.
+     */
+    public function isDue(string $host): bool
+    {
+        $row = (new Query())->select(['resolves', 'failures', 'checkedAt'])->from(self::TABLE)->where(['host' => $host])->one();
+        if ($row === null || $row === false) {
+            return true;
+        }
+        $interval = match (true) {
+            !$row['resolves'] => self::RECHECK_FAILED,
+            (int)$row['failures'] > 0 => self::RECHECK_FIRST_FAILURE,
+            default => self::RECHECK_OK,
+        };
+        $since = (new \DateTime())->sub(new \DateInterval($interval));
+        return Db::prepareDateForDb($since) > $row['checkedAt'];
+    }
+
+    /**
+     * Stores a lookup: a failure only counts when the previous one was at least 45 minutes ago.
+     */
+    private function store(string $host, bool $resolves): void
+    {
+        $previous = (new Query())->select(['resolves', 'failures', 'checkedAt'])->from(self::TABLE)->where(['host' => $host])->one();
+        $failures = 0;
+        if (!$resolves) {
+            $failures = Urls::failures((int)($previous['failures'] ?? 0), $previous['checkedAt'] ?? null, time());
+        }
+        Db::upsert(self::TABLE, [
+            'host' => $host,
+            'resolves' => $resolves || $failures < self::FAILURES,
+            'failures' => min($failures, 100),
+            'checkedAt' => Db::prepareDateForDb(new \DateTime()),
+        ]);
     }
 
     /**

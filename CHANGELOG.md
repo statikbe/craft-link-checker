@@ -1,5 +1,20 @@
 # Release Notes for Link Checker
 
+## 1.2.1 - 2026-10-30
+
+### Fixed
+- Updating from 1.0.0 or 1.1.0 broke the dashboard and entry saves: a migration now adds the missing tables and columns (`php craft up`) and reads the links again
+- External pages: every request goes through curl and is pinned to the checked address (the GET fallback could connect elsewhere); IPv6 addresses are checked too, and carrier-grade NAT, multicast and other non-public ranges are refused, also on redirects; a request through a proxy or to another address isn't used
+- "The website’s domain doesn’t exist" never showed in the Links panel and the check on publish
+- Two checks close together (two queue jobs, a deploy) could make an external link broken within minutes: a failure only counts an hour after the previous check, a URL another job checked is skipped, and only one job waits at a time
+- A domain only counts as not existing after two failed lookups an hour apart; domain lookups run in batches
+- With `checkDomains` off, external pages weren't checked at all
+- Links in disabled blocks were checked on publish (and could block it)
+- A link can only be ignored from the Links panel when it's on the page; ignoring from a page in another site than the primary one failed
+- The check on publish only runs in the control panel (not for front-end entry forms or GraphQL)
+- The CSV export no longer lets a spreadsheet run link text as a formula
+- One page that can't be read no longer stops a rebuild
+
 ## 1.2.0 - 2026-10-30
 
 ### Added
