@@ -5,6 +5,7 @@ namespace statikbe\linkchecker\widgets;
 use Craft;
 use craft\base\Widget;
 use statikbe\linkchecker\LinkChecker;
+use statikbe\linkchecker\services\Report;
 
 /**
  * Dashboard widget: the pages with broken links, with a link to edit each one and the broken links under a toggle. Only the
@@ -54,6 +55,10 @@ class BrokenLinks extends Widget
         $sites = Craft::$app->getSites();
         $shown = array_slice($pages, 0, $this->limit);
         foreach ($shown as &$page) {
+            foreach ($page['links'] as &$link) {
+                $link['reasonLabel'] = Report::reasonLabel((string)$link['reason']);
+            }
+            unset($link);
             $page['url'] = $report->editUrl($page['sourceId'], $page['siteId']);
             $page['site'] = $sites->getSiteById($page['siteId'], true)?->getName() ?? '';
         }

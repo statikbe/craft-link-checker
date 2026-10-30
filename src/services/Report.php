@@ -6,7 +6,6 @@ use Craft;
 use craft\base\Component;
 use craft\db\Query;
 use craft\db\Table;
-use craft\elements\Entry;
 use craft\elements\User;
 use craft\helpers\Db;
 use statikbe\linkchecker\helpers\LinkParser;
@@ -36,6 +35,7 @@ class Report extends Component
         'no-url' => self::BROKEN,
         'page-not-found' => self::BROKEN,
         'redirected' => self::WARNING,
+        'domain-not-found' => self::BROKEN,
         'anchor-missing' => self::WARNING,
         'pending' => self::WARNING,
         'deleted-fallback' => self::WARNING,
@@ -103,25 +103,32 @@ class Report extends Component
         $query = (new Query())
             ->select([
                 'l.*',
-                'sourceTitle' => 'ses.title',
+                'sourceTitle' => 'coalesce([[ses.title]], [[gs.name]])',
                 'targetElementId' => 'te.id', 'targetDeleted' => 'te.dateDeleted', 'targetEnabled' => 'te.enabled',
                 'targetArchived' => 'te.archived', 'targetSiteRow' => 'tes.id', 'targetSiteEnabled' => 'tes.enabled',
                 'targetUri' => 'tes.uri', 'targetTitle' => 'tes.title', 'targetPostDate' => 'ten.postDate',
                 'targetExpiryDate' => 'ten.expiryDate',
+                'hostResolves' => 'h.resolves',
             ])
             ->from(['l' => Index::TABLE])
             // The page: not in the trash, a canonical entry
             ->innerJoin(['se' => Table::ELEMENTS], '[[se.id]] = [[l.sourceId]]')
             ->innerJoin(['ses' => Table::ELEMENTS_SITES], '[[ses.elementId]] = [[l.sourceId]] AND [[ses.siteId]] = [[l.siteId]]')
-            ->innerJoin(['sen' => Table::ENTRIES], '[[sen.id]] = [[l.sourceId]]')
+            // An entry, or a global set
+            ->leftJoin(['sen' => Table::ENTRIES], '[[sen.id]] = [[l.sourceId]]')
+            ->leftJoin(['gs' => Table::GLOBALSETS], '[[gs.id]] = [[l.sourceId]]')
             // The target of an element link
             ->leftJoin(['te' => Table::ELEMENTS], '[[te.id]] = [[l.targetId]]')
             ->leftJoin(['tes' => Table::ELEMENTS_SITES], '[[tes.elementId]] = [[l.targetId]] AND [[tes.siteId]] = [[l.targetSiteId]]')
             ->leftJoin(['ten' => Table::ENTRIES], '[[ten.id]] = [[l.targetId]]')
+            // The domain of an external link
+            ->leftJoin(['h' => Hosts::TABLE], '[[h.host]] = [[l.host]]')
             ->where(['se.dateDeleted' => null, 'se.draftId' => null, 'se.revisionId' => null])
+            ->andWhere(['or', ['not', ['sen.id' => null]], ['not', ['gs.id' => null]]])
             ->andWhere(['or',
                 ['not', ['l.issue' => null]],
                 $settings->checkAnchors ? ['not', ['l.suffix' => null]] : '1 = 0',
+                $settings->checkDomains ? ['h.resolves' => false] : '1 = 0',
                 ['l.kind' => LinkParser::KIND_URL],
                 ['and',
                     ['l.kind' => $elementKinds],
@@ -146,13 +153,94 @@ class Report extends Component
         }
         if ($user !== null && !$user->admin) {
             $sections = $this->editableSectionIds($user);
-            if (!$sections) {
+            $globalSets = $this->editableGlobalSetIds($user);
+            if (!$sections && !$globalSets) {
                 return [];
             }
-            $query->andWhere(['sen.sectionId' => $sections]);
+            $query->andWhere(['or', ['sen.sectionId' => $sections ?: [0]], ['gs.id' => $globalSets ?: [0]]]);
         }
 
-        $rows = $query->all();
+        return $this->judge($query->all());
+    }
+
+    /**
+     * The problems of the links of a page as it's edited (read from the element, not from the table): for the sidebar panel
+     * and the check on publish. Same reasons as the report; anchors on the page itself are the ones it has now.
+     *
+     * @param array<array<string, mixed>> $links link records from the Extractor
+     * @param string[] $pageAnchors
+     * @return array<array<string, mixed>> the links with a problem, with reason and severity
+     */
+    public function evaluate(array $links, array $pageAnchors, int $pageId, int $siteId): array
+    {
+        if (!$links) {
+            return [];
+        }
+        $ids = array_values(array_unique(array_filter(array_map(
+            fn(array $link) => in_array($link['kind'], LinkParser::ELEMENT_KINDS, true) ? (int)$link['targetId'] : null,
+            $links,
+        ))));
+        $elements = [];
+        $sites = [];
+        foreach (array_chunk($ids, 500) as $chunk) {
+            $rows = (new Query())
+                ->select(['e.id', 'e.dateDeleted', 'e.enabled', 'e.archived', 'en.postDate', 'en.expiryDate'])
+                ->from(['e' => Table::ELEMENTS])
+                ->leftJoin(['en' => Table::ENTRIES], '[[en.id]] = [[e.id]]')
+                ->where(['e.id' => $chunk])
+                ->all();
+            foreach ($rows as $row) {
+                $elements[(int)$row['id']] = $row;
+            }
+            $rows = (new Query())
+                ->select(['id', 'elementId', 'siteId', 'enabled', 'uri', 'title'])
+                ->from(Table::ELEMENTS_SITES)
+                ->where(['elementId' => $chunk])
+                ->all();
+            foreach ($rows as $row) {
+                $sites[$row['elementId'] . ':' . $row['siteId']] = $row;
+            }
+        }
+
+        $hosts = array_values(array_unique(array_filter(array_column($links, 'host'))));
+        $resolves = $hosts ? (new Query())->select(['resolves', 'host'])->from(Hosts::TABLE)->where(['host' => $hosts])->pairs() : [];
+        $resolves = array_flip(array_keys(array_filter($resolves, fn($value) => !$value)));
+
+        $rows = [];
+        foreach ($links as $link) {
+            $element = $elements[(int)$link['targetId']] ?? null;
+            $site = $sites[$link['targetId'] . ':' . $link['targetSiteId']] ?? null;
+            $rows[] = array_merge($link, [
+                'sourceId' => $pageId,
+                'siteId' => $siteId,
+                'targetElementId' => $element['id'] ?? null,
+                'targetDeleted' => $element['dateDeleted'] ?? null,
+                'targetEnabled' => $element['enabled'] ?? null,
+                'targetArchived' => $element['archived'] ?? null,
+                'targetSiteRow' => $site['id'] ?? null,
+                'targetSiteEnabled' => $site['enabled'] ?? null,
+                'targetUri' => $site['uri'] ?? null,
+                'targetTitle' => $site['title'] ?? null,
+                'targetPostDate' => $element['postDate'] ?? null,
+                'targetExpiryDate' => $element['expiryDate'] ?? null,
+                'hostResolves' => isset($link['host']) && isset($resolves[$link['host']]) ? false : null,
+            ]);
+        }
+        return $this->judge($rows, [$pageId . ':' . $siteId => array_fill_keys($pageAnchors, true)]);
+    }
+
+    /**
+     * The links with a problem among these rows (a link with its target's state), with reason and severity.
+     *
+     * @param array<array<string, mixed>> $rows
+     * @param array<string, array<string, true>> $anchorOverrides the anchors of pages as they're edited, 'pageId:siteId'
+     * @return array<array<string, mixed>>
+     */
+    private function judge(array $rows, array $anchorOverrides = []): array
+    {
+        $now = Db::prepareDateForDb(new \DateTime());
+        $settings = LinkChecker::getInstance()->getSettings();
+        $crossSite = $settings->crossSiteLinks === 'warning';
         $live = $this->liveUris(array_merge(
             array_filter($rows, fn(array $row) => $row['kind'] === LinkParser::KIND_URL),
             array_map(
@@ -173,7 +261,7 @@ class Report extends Component
             }
         }
         if ($anchorChecks) {
-            $anchors = $this->anchors(array_values($anchorChecks));
+            $anchors = array_merge($this->anchors(array_values($anchorChecks)), $anchorOverrides);
             foreach ($anchorChecks as $i => [$pageId, $siteId, $anchor]) {
                 $defined = $anchors[$pageId . ':' . $siteId] ?? null;
                 // Only for a page that was read (its anchors are known), and an anchor the templates don't render
@@ -193,6 +281,31 @@ class Report extends Component
             $result[] = $row;
         }
         return $result;
+    }
+
+    /**
+     * The reason in words, for editors.
+     */
+    public static function reasonLabel(string $reason): string
+    {
+        return match ($reason) {
+            'deleted' => Craft::t('link-checker', 'Deleted'),
+            'trashed' => Craft::t('link-checker', 'In the trash'),
+            'disabled' => Craft::t('link-checker', 'Disabled'),
+            'not-in-site' => Craft::t('link-checker', 'Not in this site'),
+            'expired' => Craft::t('link-checker', 'Expired'),
+            'no-url' => Craft::t('link-checker', 'Has no page of its own'),
+            'page-not-found' => Craft::t('link-checker', 'Page not found'),
+            'redirected' => Craft::t('link-checker', 'Redirected: better to link to the page itself'),
+            'domain-not-found' => Craft::t('link-checker', 'The website’s domain doesn’t exist'),
+            'anchor-missing' => Craft::t('link-checker', 'Anchor not found on the page'),
+            'pending' => Craft::t('link-checker', 'Not published yet'),
+            'deleted-fallback' => Craft::t('link-checker', 'Deleted, but the link still works through its saved URL'),
+            'other-site' => Craft::t('link-checker', 'In another language'),
+            'invalid-email' => Craft::t('link-checker', 'Invalid email address'),
+            'invalid-phone' => Craft::t('link-checker', 'Invalid phone number'),
+            default => $reason,
+        };
     }
 
     /**
@@ -234,6 +347,10 @@ class Report extends Component
                 $crossSite && (int)$row['targetSiteId'] !== (int)$row['siteId'] => 'other-site',
                 default => null,
             };
+        }
+        if ($row['kind'] === LinkParser::KIND_EXTERNAL && $row['hostResolves'] !== null && !$row['hostResolves']
+            && LinkChecker::getInstance()->getSettings()->checkDomains) {
+            return 'domain-not-found';
         }
         if ($row['kind'] === LinkParser::KIND_URL) {
             if ($row['issue'] === 'route') {
@@ -355,6 +472,22 @@ class Report extends Component
     }
 
     /**
+     * The global sets the user may edit.
+     *
+     * @return int[]
+     */
+    private function editableGlobalSetIds(User $user): array
+    {
+        $ids = [];
+        foreach (Craft::$app->getGlobals()->getAllSets() as $set) {
+            if ($user->can("editGlobalSet:$set->uid")) {
+                $ids[] = (int)$set->id;
+            }
+        }
+        return $ids;
+    }
+
+    /**
      * The sections whose entries the user may edit.
      *
      * @return int[]
@@ -375,7 +508,6 @@ class Report extends Component
      */
     public function editUrl(int $sourceId, int $siteId): ?string
     {
-        $entry = Entry::find()->id($sourceId)->siteId($siteId)->status(null)->one();
-        return $entry?->getCpEditUrl();
+        return Craft::$app->getElements()->getElementById($sourceId, null, $siteId)?->getCpEditUrl();
     }
 }

@@ -36,21 +36,23 @@ class Extractor extends Component
      * The links of a page in its site, and the anchors it defines (ids in its content, Entry Anchors fields).
      *
      * @return array{links: array<array<string, mixed>>, anchors: string[]} link records with sourceId, siteId, elementId,
-     *   fieldId, location and label
+     *   fieldId, location and label, and (not stored) the element, its field handle and the chain of nested entries from
+     *   the page down to it: [['element' => …, 'field' => handle of the field the next one is in], …]
      */
     public function extract(ElementInterface $page): array
     {
         $links = [];
         $this->anchors = [];
-        $this->walk($page, $page, [], $links, 0);
+        $this->walk($page, $page, [], [], $links, 0);
         return ['links' => $links, 'anchors' => array_keys($this->anchors)];
     }
 
     /**
      * @param string[] $path
+     * @param array<array{element: ElementInterface, field: string}> $chain
      * @param array<array<string, mixed>> $links
      */
-    private function walk(ElementInterface $page, ElementInterface $element, array $path, array &$links, int $depth): void
+    private function walk(ElementInterface $page, ElementInterface $element, array $path, array $chain, array &$links, int $depth): void
     {
         $settings = LinkChecker::getInstance()->getSettings();
         foreach ($element->getFieldLayout()?->getCustomFields() ?? [] as $field) {
@@ -74,19 +76,19 @@ class Extractor extends Component
                 }
                 foreach ($this->entries($value) as $i => $entry) {
                     $label = sprintf('%s %d (%s)', $name, $i + 1, Craft::t('site', $entry->getType()->name));
-                    $this->walk($page, $entry, [...$path, $label], $links, $depth + 1);
+                    $this->walk($page, $entry, [...$path, $label], [...$chain, ['element' => $element, 'field' => $field->handle]], $links, $depth + 1);
                 }
                 continue;
             }
             if ($value instanceof ElementInterface && is_a($field, 'craft\fields\ContentBlock')) {
-                $this->walk($page, $value, [...$path, $name], $links, $depth + 1);
+                $this->walk($page, $value, [...$path, $name], [...$chain, ['element' => $element, 'field' => $field->handle]], $links, $depth + 1);
                 continue;
             }
 
             $location = implode(' › ', [...$path, $name]);
             if ($field instanceof Link) {
                 if ($value instanceof LinkData) {
-                    $this->addLinkData($page, $element, $field, $location, $value, $links);
+                    $this->addLinkData($page, $element, $field, $location, $value, $links, $chain);
                 }
             } elseif ($field instanceof HtmlField) {
                 $html = $value instanceof HtmlFieldData ? $value->getRawContent() : (string)$value;
@@ -94,25 +96,26 @@ class Extractor extends Component
                     $this->anchors[$id] = true;
                 }
                 foreach (LinkParser::htmlLinks($html) as $link) {
-                    $this->add($page, $element, $field, $location, $link['url'], $link['text'], null, $links);
+                    $this->add($page, $element, $field, $location, $link['url'], $link['text'], null, $links, $chain);
                 }
                 // Entries nested in CKEditor
                 if (is_object($value) && method_exists($value, 'getEntries') && $depth < self::MAX_DEPTH) {
                     foreach ($this->entries($value->getEntries()) as $i => $entry) {
                         $label = sprintf('%s (%s)', $name, Craft::t('site', $entry->getType()->name));
-                        $this->walk($page, $entry, [...$path, $label], $links, $depth + 1);
+                        $this->walk($page, $entry, [...$path, $label], [...$chain, ['element' => $element, 'field' => $field->handle]], $links, $depth + 1);
                     }
                 }
             } elseif (is_a($field, 'verbb\hyper\fields\HyperField')) {
-                $this->addHyper($page, $element, $field, $location, $this->serialize($field, $value, $element), $links);
+                $this->addHyper($page, $element, $field, $location, $this->serialize($field, $value, $element), $links, $chain);
             }
         }
     }
 
     /**
      * @param array<array<string, mixed>> $links
+     * @param array<array{element: ElementInterface, field: string}> $chain
      */
-    private function addLinkData(ElementInterface $page, ElementInterface $element, FieldInterface $field, string $location, LinkData $data, array &$links): void
+    private function addLinkData(ElementInterface $page, ElementInterface $element, FieldInterface $field, string $location, LinkData $data, array &$links, array $chain): void
     {
         $stored = $data->serialize();
         $raw = (string)($stored['value'] ?? '');
@@ -122,15 +125,16 @@ class Extractor extends Component
             'sms' => '',
             default => $raw,
         };
-        $this->add($page, $element, $field, $location, $raw, $stored['label'] ?? null, $stored['urlSuffix'] ?? null, $links);
+        $this->add($page, $element, $field, $location, $raw, $stored['label'] ?? null, $stored['urlSuffix'] ?? null, $links, $chain);
     }
 
     /**
      * Hyper stores a list of links: {type: 'verbb\hyper\links\Entry', linkValue: [12] or 'https://…', linkSiteId, linkText}.
      *
      * @param array<array<string, mixed>> $links
+     * @param array<array{element: ElementInterface, field: string}> $chain
      */
-    private function addHyper(ElementInterface $page, ElementInterface $element, FieldInterface $field, string $location, mixed $stored, array &$links): void
+    private function addHyper(ElementInterface $page, ElementInterface $element, FieldInterface $field, string $location, mixed $stored, array &$links, array $chain): void
     {
         if (!is_array($stored)) {
             return;
@@ -150,14 +154,15 @@ class Extractor extends Component
                 'url' => is_string($value) ? $value : '',
                 default => '',
             };
-            $this->add($page, $element, $field, $location, $raw, $link['linkText'] ?? null, $link['urlSuffix'] ?? null, $links);
+            $this->add($page, $element, $field, $location, $raw, $link['linkText'] ?? null, $link['urlSuffix'] ?? null, $links, $chain);
         }
     }
 
     /**
      * @param array<array<string, mixed>> $links
+     * @param array<array{element: ElementInterface, field: string}> $chain
      */
-    private function add(ElementInterface $page, ElementInterface $element, FieldInterface $field, string $location, string $raw, ?string $label, ?string $suffix, array &$links): void
+    private function add(ElementInterface $page, ElementInterface $element, FieldInterface $field, string $location, string $raw, ?string $label, ?string $suffix, array &$links, array $chain): void
     {
         $plugin = LinkChecker::getInstance();
         if ($raw === '' || $plugin->getSettings()->isIgnored($raw)) {
@@ -183,6 +188,9 @@ class Extractor extends Component
             'location' => mb_substr($location, 0, 1000),
             'label' => $label !== null && $label !== '' ? mb_substr(strip_tags($label), 0, 255) : null,
             'url' => $raw,
+            'element' => $element,
+            'fieldHandle' => $field->handle,
+            'chain' => $chain,
         ]);
     }
 

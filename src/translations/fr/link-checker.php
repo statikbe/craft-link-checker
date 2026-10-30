@@ -27,4 +27,12 @@ return [
     'The other pages are only counted.' => 'Les autres pages sont seulement comptées.',
     'Show warnings' => 'Afficher les avertissements',
     'Also list links to entries that aren’t published yet, invalid email addresses and phone numbers, and anchors that aren’t found.' => 'Afficher aussi les liens vers des entrées pas encore publiées, les adresses e-mail et numéros de téléphone non valides, et les ancres introuvables.',
+    'Links' => 'Liens',
+    '{count, plural, =0{No links} =1{# link, no problems} other{# links, no problems}}' => '{count, plural, =0{Aucun lien} =1{# lien, aucun problème} other{# liens, aucun problème}}',
+    '{location}: the link “{link}” is broken ({reason})' => '{location} : le lien « {link} » est brisé ({reason})',
+    'This page has {count, plural, =1{# broken link} other{# broken links}}: {links}. See the Links panel.' => 'Cette page contient {count, plural, =1{# lien brisé} other{# liens brisés}} : {links}. Voir le panneau Liens.',
+    '“{link}” ({reason})' => '« {link} » ({reason})',
+    'The website’s domain doesn’t exist' => 'Le domaine du site n\'existe pas',
+    'Checking the domains of external links' => 'Vérification des domaines des liens externes',
+    'Of external links only the domain is checked, not the page.' => 'Pour les liens externes, seul le domaine est vérifié, pas la page.',
 ];

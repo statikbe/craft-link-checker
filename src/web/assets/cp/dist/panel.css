@@ -1,0 +1,112 @@
+/* Links panel in the entry sidebar (templates/_panel, panel.js) */
+.lc-panel__legend {
+  width: 100%;
+}
+
+.lc-panel__toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-transform: inherit;
+  letter-spacing: inherit;
+  cursor: pointer;
+}
+
+.lc-panel__chevron::before {
+  content: '';
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-right: 2px solid currentColor;
+  border-bottom: 2px solid currentColor;
+  transform: rotate(45deg);
+  margin-bottom: 3px;
+  transition: transform 0.15s;
+}
+
+.lc-panel.is-collapsed .lc-panel__chevron::before {
+  transform: rotate(-45deg);
+  margin-bottom: 0;
+}
+
+.lc-panel__summary {
+  margin-inline-start: auto;
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 400;
+}
+
+.lc-panel__summary--broken {
+  color: var(--error-color, #cf1124);
+}
+
+.lc-panel.is-collapsed .lc-panel__body {
+  display: none;
+}
+
+.lc-panel__body {
+  padding: 12px var(--m, 14px);
+}
+
+.lc-panel__ok {
+  margin: 0;
+  font-size: 13px;
+}
+
+.lc-panel__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 10px;
+}
+
+.lc-panel__item {
+  display: flex;
+  gap: 8px;
+  font-size: 13px;
+  line-height: 1.4;
+  min-width: 0;
+}
+
+.lc-panel__reason {
+  flex: none;
+  line-height: 1.4;
+}
+
+.lc-panel__item--broken .lc-panel__reason,
+.lc-panel__item--broken .lc-panel__why {
+  color: var(--error-color, #cf1124);
+}
+
+.lc-panel__item--warning .lc-panel__reason,
+.lc-panel__item--warning .lc-panel__why {
+  color: var(--notice-color, #b45309);
+}
+
+.lc-panel__text {
+  display: grid;
+  min-width: 0;
+}
+
+.lc-panel__text strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lc-panel__where {
+  color: var(--light-text-color, #606d7b);
+  font-size: 12px;
+}
+
+.lc-panel__note {
+  margin: 10px 0 0;
+  font-size: 12px;
+}

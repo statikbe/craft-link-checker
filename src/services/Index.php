@@ -4,8 +4,10 @@ namespace statikbe\linkchecker\services;
 
 use Craft;
 use craft\base\Component;
+use craft\base\ElementInterface;
 use craft\db\Query;
 use craft\elements\Entry;
+use craft\elements\GlobalSet;
 use craft\helpers\Db;
 use craft\helpers\StringHelper;
 use statikbe\linkchecker\LinkChecker;
@@ -23,15 +25,16 @@ class Index extends Component
     private array $pending = [];
 
     /**
-     * After an entry is saved: the page it's on is read again at the end of the request. Not for drafts, revisions, resaving
-     * (`craft resave`, a project config change) or propagation to other sites: the page is read in every site anyway.
+     * After an entry or global set is saved: the page it's on is read again at the end of the request. Not for drafts,
+     * revisions, resaving (`craft resave`, a project config change) or propagation to other sites: the page is read in
+     * every site anyway.
      */
-    public function entrySaved(Entry $entry): void
+    public function elementSaved(ElementInterface $element): void
     {
-        if ($entry->getIsDraft() || $entry->getIsRevision() || $entry->resaving || $entry->propagating) {
+        if ($element->getIsDraft() || $element->getIsRevision() || $element->resaving || $element->propagating) {
             return;
         }
-        $page = $this->page($entry);
+        $page = $element instanceof Entry ? $this->page($element) : ($element instanceof GlobalSet ? $element : null);
         if ($page === null) {
             return;
         }
@@ -44,28 +47,37 @@ class Index extends Component
     /**
      * Removes the links of a page that was deleted (a hard delete removes them through the foreign key).
      */
-    public function forget(Entry $entry): void
+    public function forget(ElementInterface $entry): void
     {
-        if ($entry->getSection() !== null && !$entry->getIsDraft() && !$entry->getIsRevision()) {
+        $page = $entry instanceof GlobalSet || ($entry instanceof Entry && $entry->getSection() !== null);
+        if ($page && !$entry->getIsDraft() && !$entry->getIsRevision()) {
             Db::delete(self::TABLE, ['sourceId' => $entry->id]);
             Db::delete(self::ANCHORS_TABLE, ['pageId' => $entry->id]);
         }
     }
 
     /**
-     * Reads the links of a page in every site it's in.
+     * Reads the links of a page (an entry in a section, or a global set) in every site it's in.
      */
     public function index(int $pageId): void
     {
         $plugin = LinkChecker::getInstance();
-        $sites = Entry::find()->id($pageId)->site('*')->status(null)->all();
-        $section = ($sites[0] ?? null)?->getSection();
+        $settings = $plugin->getSettings();
+        $type = (new Query())->select(['type'])->from(\craft\db\Table::ELEMENTS)->where(['id' => $pageId])->scalar();
+        if ($type === GlobalSet::class) {
+            $sites = $settings->checkGlobals ? GlobalSet::find()->id($pageId)->site('*')->all() : [];
+            $checked = $settings->checkGlobals;
+        } else {
+            $sites = Entry::find()->id($pageId)->site('*')->status(null)->all();
+            $section = ($sites[0] ?? null)?->getSection();
+            $checked = $section !== null && $settings->checksSection($section->handle);
+        }
         $db = Craft::$app->getDb();
         $transaction = $db->beginTransaction();
         try {
             Db::delete(self::TABLE, ['sourceId' => $pageId]);
             Db::delete(self::ANCHORS_TABLE, ['pageId' => $pageId]);
-            if ($section !== null && $plugin->getSettings()->checksSection($section->handle)) {
+            if ($checked && $sites) {
                 $now = Db::prepareDateForDb(new \DateTime());
                 $rows = [];
                 $anchors = [];
@@ -83,17 +95,16 @@ class Index extends Component
                             $link['url'], $link['suffix'] !== null ? mb_substr($link['suffix'], 0, 255) : null,
                             $link['label'], $link['issue'],
                             $link['fallbackUri'] !== null ? mb_substr($link['fallbackUri'], 0, 500) : null, $link['fallbackSiteId'],
+                            $link['host'] !== null ? mb_substr($link['host'], 0, 255) : null,
                             $now, $now, StringHelper::UUID(),
                         ];
                     }
                 }
-                if ($anchors) {
-                    Db::batchInsert(self::ANCHORS_TABLE, ['pageId', 'siteId', 'anchor'], $anchors);
-                }
+                Db::batchInsert(self::ANCHORS_TABLE, ['pageId', 'siteId', 'anchor'], $anchors);
                 if ($rows) {
                     Db::batchInsert(self::TABLE, [
                         'sourceId', 'siteId', 'elementId', 'fieldId', 'location', 'kind', 'targetId', 'targetSiteId', 'uri',
-                        'url', 'suffix', 'label', 'issue', 'fallbackUri', 'fallbackSiteId', 'dateCreated', 'dateUpdated', 'uid',
+                        'url', 'suffix', 'label', 'issue', 'fallbackUri', 'fallbackSiteId', 'host', 'dateCreated', 'dateUpdated', 'uid',
                     ], $rows);
                 }
             }
@@ -123,6 +134,8 @@ class Index extends Component
                 Craft::error("Couldn't read the links of entry {$id}: {$e->getMessage()}", __METHOD__);
             }
         }
+        // New domains are looked up in a queue job, not in the editor's request
+        LinkChecker::getInstance()->getHosts()->queueIfDue();
     }
 
     /**

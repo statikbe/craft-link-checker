@@ -1,0 +1,22 @@
+{# The problems of the page's links (Report::evaluate()): problems = [{severity, reasonLabel, label, url, location}], total #}
+{% set broken = problems|filter(p => p.severity == 'broken')|length %}
+{% set warnings = problems|length - broken %}
+<div data-panel-counts data-broken="{{ broken }}" data-warnings="{{ warnings }}">
+    {% if problems is empty %}
+        <p class="lc-panel__ok">{{ '{count, plural, =0{No links} =1{# link, no problems} other{# links, no problems}}'|t('link-checker', { count: total }) }}</p>
+    {% else %}
+        <ul class="lc-panel__list">
+            {% for problem in problems %}
+                <li class="lc-panel__item lc-panel__item--{{ problem.severity }}">
+                    <span class="lc-panel__reason" data-icon="{{ problem.severity == 'broken' ? 'alert' : 'info' }}" aria-hidden="true"></span>
+                    <span class="lc-panel__text">
+                        <strong>{{ problem.label ?? problem.targetTitle ?? problem.url }}</strong>
+                        <span class="lc-panel__why">{{ problem.reasonLabel }}</span>
+                        <span class="lc-panel__where">{{ problem.location }}</span>
+                    </span>
+                </li>
+            {% endfor %}
+        </ul>
+        <p class="lc-panel__note light">{{ 'Of external links only the domain is checked, not the page.'|t('link-checker') }}</p>
+    {% endif %}
+</div>

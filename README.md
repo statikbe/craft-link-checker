@@ -5,13 +5,17 @@ editors can fix them before visitors find them.
 
 - **Broken links**: links to entries that were deleted, are in the trash, disabled, expired, not in the page's site or have no
   page of their own; links to deleted assets; links to pages of the site itself (`/nl/over-ons`, `https://example.be/…`)
-  that no longer exist.
+  that no longer exist; links to a website whose domain doesn't exist (a typo, an expired domain).
 - **Warnings**: links to entries that aren't published yet; links to a page that a redirect sends on (link to the page
   itself); anchors (`#team`) that aren't on the target page; invalid email addresses and phone numbers; a deleted entry whose
   saved URL still works.
 - **Broken links** dashboard widget: the pages with broken links, with a link to edit each one and every broken link with
   its reason and where it is (*Content builder 2 (Content row) › Columns 1 (Text) › Text*). Each user only sees the pages
   they may edit.
+- **Links panel** in the entry sidebar: the problems of the page as it's edited, updated after every autosave.
+- **Check on publish**: a warning (or, with `'block'`, an error that stops the save) when a page has broken links, shown on
+  the row, the block or column and the field, as for Craft's own errors.
+- **Global sets** (a footer, site settings) are checked too.
 - **Console**: `craft link-checker/rebuild` reads every page again; `craft link-checker/report` lists the problems.
 
 It reads native Link fields, rich text fields (CKEditor, Redactor) and [Hyper](https://verbb.io/craft-plugins/hyper) fields,
@@ -30,7 +34,10 @@ links typed as a URL break when a page moves. Those are matched against the URIs
 templates of the site, and the redirects of [SEO Fields](https://plugins.craftcms.com/seo-fields) and
 [Retour](https://plugins.craftcms.com/retour).
 
-External links (to other websites) are found but not checked yet: checking them over HTTP is planned for a later version.
+Of external links (to other websites) only the domain is checked: a DNS lookup in a queue job, cached per domain (a domain
+that exists is looked up again after 7 days, one that doesn't after a day). The lookups never run in an editor's request, and
+when even `example.com` can't be looked up (no network, a broken resolver) nothing is marked. Checking the pages themselves
+over HTTP is planned for a later version.
 
 ## Requirements
 
@@ -84,6 +91,19 @@ return [
 
     // Invalid mailto: and tel: links, as warnings
     'checkEmailAndPhone' => true,
+
+    // Also check the global sets
+    'checkGlobals' => true,
+
+    // Check that the domain of an external link exists (DNS)
+    'checkDomains' => true,
+
+    // When an entry with broken links is published: 'warn' (saved, with a warning), 'block' (not saved, the errors on the
+    // fields) or false. Warnings never count. A link can break without the page being edited, so 'warn' is the default.
+    'mode' => 'warn',
+
+    // The Links panel in the entry sidebar
+    'panel' => true,
 ];
 ```
 
@@ -93,6 +113,20 @@ A page's anchors are the ids in its rich text (`id` and `name` attributes) and t
 [Entry Anchors](https://github.com/statikbe/craft-entry-anchors) fields. Ids that only your templates render aren't in the
 content: list them in `knownAnchors`, or a link to them is reported as an anchor that's not found. A page in a section that
 isn't checked has no known anchors, so links to its anchors aren't reported.
+
+## The Links panel
+
+The sidebar of an entry gets a **Links** panel under the notes: the broken links and warnings of the page as it's edited,
+also the changes that aren't saved yet, with the reason and where each link is. It's collapsible (the browser remembers it
+for every entry) and reloads after every autosave. The number of broken links shows next to its title, also when it's
+collapsed.
+
+## Check on publish
+
+With `'warn'`, publishing a page with broken links shows a warning that lists them; the page is saved. With `'block'`, it
+isn't saved: each broken link is shown where it is, on the row or block, the column (its card turns red) and the field. Only
+broken links count, never warnings, and only when an entry is published in a web request: not for drafts, autosaves,
+resaving or console commands.
 
 ## Widget
 

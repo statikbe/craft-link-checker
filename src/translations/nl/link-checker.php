@@ -27,4 +27,12 @@ return [
     'The other pages are only counted.' => 'De andere pagina\'s worden alleen geteld.',
     'Show warnings' => 'Waarschuwingen tonen',
     'Also list links to entries that aren’t published yet, invalid email addresses and phone numbers, and anchors that aren’t found.' => 'Toon ook links naar entries die nog niet gepubliceerd zijn, ongeldige e-mailadressen en telefoonnummers, en ankers die niet gevonden worden.',
+    'Links' => 'Links',
+    '{count, plural, =0{No links} =1{# link, no problems} other{# links, no problems}}' => '{count, plural, =0{Geen links} =1{# link, geen problemen} other{# links, geen problemen}}',
+    '{location}: the link “{link}” is broken ({reason})' => '{location}: de link “{link}” is kapot ({reason})',
+    'This page has {count, plural, =1{# broken link} other{# broken links}}: {links}. See the Links panel.' => 'Deze pagina heeft {count, plural, =1{# kapotte link} other{# kapotte links}}: {links}. Zie het paneel Links.',
+    '“{link}” ({reason})' => '“{link}” ({reason})',
+    'The website’s domain doesn’t exist' => 'Het domein van de website bestaat niet',
+    'Checking the domains of external links' => 'Domeinen van externe links controleren',
+    'Of external links only the domain is checked, not the page.' => 'Van externe links wordt alleen het domein gecontroleerd, niet de pagina.',
 ];

@@ -28,3 +28,10 @@ it('translates every message', function(string $language) use ($php, $twig, $js)
     $messages = array_map(fn(string $message) => stripslashes($message), array_unique([...$php, ...$twig, ...$js]));
     expect(array_values(array_diff($messages, array_keys($translations))))->toBe([]);
 })->with(['nl', 'fr']);
+
+it('registers every JS message for the JS', function() use ($js) {
+    $bundle = file_get_contents(dirname(__DIR__, 2) . '/src/web/assets/cp/LinkCheckerAsset.php');
+    foreach ($js as $message) {
+        expect($bundle)->toContain("'{$message}'");
+    }
+});

@@ -4,9 +4,10 @@ namespace statikbe\linkchecker\jobs;
 
 use Craft;
 use craft\base\Batchable;
-use craft\db\QueryBatcher;
 use craft\elements\Entry;
+use craft\elements\GlobalSet;
 use craft\queue\BaseBatchedJob;
+use statikbe\linkchecker\helpers\IdBatcher;
 use statikbe\linkchecker\LinkChecker;
 
 /**
@@ -18,12 +19,34 @@ class RebuildJob extends BaseBatchedJob
 
     protected function loadData(): Batchable
     {
-        return new QueryBatcher(self::query());
+        return new IdBatcher(self::ids());
     }
 
     protected function processItem(mixed $item): void
     {
-        LinkChecker::getInstance()->getIndex()->index((int)$item['id']);
+        LinkChecker::getInstance()->getIndex()->index((int)$item);
+    }
+
+    /**
+     * The ids of the pages to read: the entries (query()) and the global sets.
+     *
+     * @return int[]
+     */
+    public static function ids(): array
+    {
+        $ids = array_map('intval', self::query()->column());
+        if (LinkChecker::getInstance()->getSettings()->checkGlobals) {
+            array_push($ids, ...array_map('intval', GlobalSet::find()->site('*')->unique()->ids()));
+        }
+        return $ids;
+    }
+
+    /**
+     * After the last batch: the domains of the external links.
+     */
+    protected function after(): void
+    {
+        LinkChecker::getInstance()->getHosts()->queueIfDue();
     }
 
     protected function defaultDescription(): ?string

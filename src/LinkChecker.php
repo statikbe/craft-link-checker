@@ -4,9 +4,12 @@ namespace statikbe\linkchecker;
 
 use Craft;
 use craft\base\Element;
+use craft\base\ElementInterface;
 use craft\base\Model;
 use craft\base\Plugin;
 use craft\elements\Entry;
+use craft\elements\GlobalSet;
+use craft\events\DefineHtmlEvent;
 use craft\events\ModelEvent;
 use craft\events\RegisterComponentTypesEvent;
 use craft\events\RegisterTemplateRootsEvent;
@@ -15,10 +18,13 @@ use craft\services\Dashboard;
 use craft\web\View;
 use statikbe\linkchecker\jobs\RebuildJob;
 use statikbe\linkchecker\models\Settings;
+use statikbe\linkchecker\services\Checker;
 use statikbe\linkchecker\services\Extractor;
+use statikbe\linkchecker\services\Hosts;
 use statikbe\linkchecker\services\Index;
 use statikbe\linkchecker\services\Redirects;
 use statikbe\linkchecker\services\Report;
+use statikbe\linkchecker\web\assets\cp\LinkCheckerAsset;
 use statikbe\linkchecker\widgets\BrokenLinks;
 use yii\base\Event;
 
@@ -39,6 +45,8 @@ class LinkChecker extends Plugin
                 'index' => Index::class,
                 'report' => Report::class,
                 'redirects' => Redirects::class,
+                'checker' => Checker::class,
+                'hosts' => Hosts::class,
             ],
         ];
     }
@@ -47,21 +55,30 @@ class LinkChecker extends Plugin
     {
         parent::init();
 
-        // A saved page (or a block on it) is read again at the end of the request
-        Event::on(Entry::class, Element::EVENT_AFTER_SAVE, function(ModelEvent $event) {
+        // A saved page (or a block on it) or global set is read again at the end of the request
+        foreach ([Entry::class, GlobalSet::class] as $class) {
+            Event::on($class, Element::EVENT_AFTER_SAVE, function(ModelEvent $event) {
+                /** @var ElementInterface $element */
+                $element = $event->sender;
+                $this->getIndex()->elementSaved($element);
+            });
+            Event::on($class, Element::EVENT_AFTER_RESTORE, function(Event $event) {
+                /** @var ElementInterface $element */
+                $element = $event->sender;
+                $this->getIndex()->elementSaved($element);
+            });
+            Event::on($class, Element::EVENT_AFTER_DELETE, function(Event $event) {
+                /** @var ElementInterface $element */
+                $element = $event->sender;
+                $this->getIndex()->forget($element);
+            });
+        }
+
+        // The check when an entry is published (settings → mode)
+        Event::on(Entry::class, Element::EVENT_AFTER_VALIDATE, function(Event $event) {
             /** @var Entry $entry */
             $entry = $event->sender;
-            $this->getIndex()->entrySaved($entry);
-        });
-        Event::on(Entry::class, Element::EVENT_AFTER_RESTORE, function(Event $event) {
-            /** @var Entry $entry */
-            $entry = $event->sender;
-            $this->getIndex()->entrySaved($entry);
-        });
-        Event::on(Entry::class, Element::EVENT_AFTER_DELETE, function(Event $event) {
-            /** @var Entry $entry */
-            $entry = $event->sender;
-            $this->getIndex()->forget($entry);
+            $this->getChecker()->check($entry);
         });
 
         Event::on(Dashboard::class, Dashboard::EVENT_REGISTER_WIDGET_TYPES, function(RegisterComponentTypesEvent $event) {
@@ -71,6 +88,13 @@ class LinkChecker extends Plugin
         if (Craft::$app->getRequest()->getIsCpRequest()) {
             Event::on(View::class, View::EVENT_REGISTER_CP_TEMPLATE_ROOTS, function(RegisterTemplateRootsEvent $event) {
                 $event->roots['link-checker'] = __DIR__ . '/templates';
+            });
+
+            // The Links panel in an entry's sidebar, under the notes
+            Event::on(Entry::class, Element::EVENT_DEFINE_SIDEBAR_HTML, function(DefineHtmlEvent $event) {
+                /** @var Entry $entry */
+                $entry = $event->sender;
+                $event->html .= $this->sidebarHtml($entry);
             });
         }
     }
@@ -93,6 +117,56 @@ class LinkChecker extends Plugin
     public function getRedirects(): Redirects
     {
         return $this->get('redirects');
+    }
+
+    public function getChecker(): Checker
+    {
+        return $this->get('checker');
+    }
+
+    public function getHosts(): Hosts
+    {
+        return $this->get('hosts');
+    }
+
+    /**
+     * The Links panel: the problems of the page as it's edited (settings → panel), for entries in a checked section.
+     */
+    public function sidebarHtml(Entry $entry): string
+    {
+        $section = $entry->getSection();
+        if (!$this->getSettings()->panel || $entry->getIsRevision() || $section === null || !$this->getSettings()->checksSection($section->handle)) {
+            return '';
+        }
+        $view = Craft::$app->getView();
+        $view->registerAssetBundle(LinkCheckerAsset::class);
+        return $view->renderTemplate('link-checker/_panel/panel', [
+            'entry' => $entry,
+        ] + $this->panelVariables($entry), View::TEMPLATE_MODE_CP);
+    }
+
+    /**
+     * The list of the Links panel, also to refresh it after an autosave.
+     */
+    public function panelListHtml(Entry $entry): string
+    {
+        return Craft::$app->getView()->renderTemplate('link-checker/_panel/list', $this->panelVariables($entry), View::TEMPLATE_MODE_CP);
+    }
+
+    /**
+     * @return array{problems: array<array<string, mixed>>, total: int}
+     */
+    private function panelVariables(Entry $entry): array
+    {
+        $result = $this->getExtractor()->extract($entry);
+        $problems = $this->getReport()->evaluate($result['links'], $result['anchors'], (int)$entry->getCanonicalId(), (int)$entry->siteId);
+        usort($problems, fn(array $a, array $b) => ($a['severity'] === Report::BROKEN ? 0 : 1) <=> ($b['severity'] === Report::BROKEN ? 0 : 1));
+        foreach ($problems as &$problem) {
+            $problem['reasonLabel'] = Report::reasonLabel((string)$problem['reason']);
+            unset($problem['element'], $problem['chain']);
+        }
+        unset($problem);
+        return ['problems' => $problems, 'total' => count($result['links'])];
     }
 
     /**

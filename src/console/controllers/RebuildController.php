@@ -37,7 +37,7 @@ class RebuildController extends Controller
         }
 
         $index = LinkChecker::getInstance()->getIndex();
-        $ids = RebuildJob::query()->column();
+        $ids = RebuildJob::ids();
         $total = count($ids);
         Console::startProgress(0, $total, 'Reading the links of every page: ');
         foreach ($ids as $i => $id) {
@@ -49,7 +49,21 @@ class RebuildController extends Controller
             Console::updateProgress($i + 1, $total);
         }
         Console::endProgress();
-        $this->stdout("$total pages read.\n\n", Console::FG_GREEN);
+        $this->stdout("$total pages read.\n", Console::FG_GREEN);
+
+        $plugin = LinkChecker::getInstance();
+        if ($plugin->getSettings()->checkDomains) {
+            $due = $plugin->getHosts()->due();
+            if ($due) {
+                Console::startProgress(0, count($due), 'Checking the domains of external links: ');
+                $ok = $plugin->getHosts()->check($due, fn(int $done, int $total) => Console::updateProgress($done, $total));
+                Console::endProgress();
+                if (!$ok) {
+                    $this->stderr("DNS lookups fail here (also for " . \statikbe\linkchecker\services\Hosts::CANARY . "): the domains weren't checked.\n", Console::FG_YELLOW);
+                }
+            }
+        }
+        $this->stdout("\n");
         return $this->run('/link-checker/report');
     }
 }

@@ -7,10 +7,10 @@ namespace statikbe\linkchecker\helpers;
  * classified against the sites' base URLs.
  *
  * A link record: ['kind' => …, 'targetId' => ?int, 'targetSiteId' => ?int, 'uri' => ?string, 'url' => string,
- * 'suffix' => ?string, 'issue' => ?string, 'fallbackUri' => ?string, 'fallbackSiteId' => ?int]. Kinds:
+ * 'suffix' => ?string, 'issue' => ?string, 'fallbackUri' => ?string, 'fallbackSiteId' => ?int, 'host' => ?string]. Kinds:
  * - entry, asset, category: a reference to an element (targetId, targetSiteId);
  * - url: a URL of one of the sites (targetSiteId, uri), checked against the element URIs;
- * - external: a URL of another site (checked over HTTP in a later version);
+ * - external: a URL of another website: its domain (host) is checked (Hosts), the page itself in a later version;
  * - anchor: a link to an id on the same page (#contact);
  * - email, phone: mailto: and tel: links, with an issue when the address or number is invalid.
  */
@@ -110,7 +110,7 @@ class LinkParser
      *
      * @param array<array{id: int, baseUrl: string}> $sites the sites' base URLs (absolute), to tell own URLs from external ones
      * @param string[] $internalHosts other hosts that are this site (an old domain, www and non-www)
-     * @return array{kind: string, targetId: int|null, targetSiteId: int|null, uri: string|null, url: string, suffix: string|null, issue: string|null, fallbackUri: string|null, fallbackSiteId: int|null}|null
+     * @return array{kind: string, targetId: int|null, targetSiteId: int|null, uri: string|null, url: string, suffix: string|null, issue: string|null, fallbackUri: string|null, fallbackSiteId: int|null, host: string|null}|null
      *   null for a value that isn't a link we check (empty, javascript:, a relative path without a slash)
      */
     public static function classify(string $value, int $pageSiteId, array $sites, array $internalHosts = []): ?array
@@ -129,6 +129,7 @@ class LinkParser
             'issue' => null,
             'fallbackUri' => null,
             'fallbackSiteId' => null,
+            'host' => null,
         ];
 
         if ($ref = self::parseRef($value)) {
@@ -208,7 +209,7 @@ class LinkParser
             }
         }
         if ($best === null) {
-            return array_merge($record, ['kind' => self::KIND_EXTERNAL, 'suffix' => $suffix]);
+            return array_merge($record, ['kind' => self::KIND_EXTERNAL, 'suffix' => $suffix, 'host' => $host]);
         }
 
         $uri = trim(substr(rtrim($path, '/') . '/', strlen($best['basePath'])), '/');
