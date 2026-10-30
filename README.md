@@ -12,7 +12,7 @@ editors can fix them before visitors find them.
   saved URL still works.
 - **Broken links** dashboard widget: the pages with broken links, with a link to edit each one and every broken link with
   its reason and where it is (*Content builder 2 (Content row) › Columns 1 (Text) › Text*). Each user only sees the pages
-  they may edit.
+  they may edit: in the sites they may edit, and other people's entries only with the permission to save them.
 - **Links panel** in the entry sidebar: the problems of the page as it's edited, updated after every autosave.
 - **Check on publish**: a warning (or, with `'block'`, an error that stops the save) when a page has broken links, shown on
   the row, the block or column and the field, as for Craft's own errors.
@@ -29,9 +29,14 @@ and entries in CKEditor. No other plugin is needed, and it works on existing sit
 ## How it works
 
 Every link of every page is stored in a table, per site, with where it is. A page is read again when it (or a block on it) is
-saved. **Whether a link is broken isn't stored**: it's worked out from the target's current state each time the report is
-read. Deleting, disabling or expiring an entry shows up in the widget straight away, without reading the pages that link to
-it, and without cron.
+saved, in a queue job right after the save, so saving isn't slower. **Whether a link is broken isn't stored**: it's worked
+out from the target's current state when the report is read. Deleting, disabling or restoring an entry shows up in the
+widget straight away, without reading the pages that link to it, and without cron. The report is cached for up to 10
+minutes, and cleared whenever an element is saved, deleted or restored, pages are read or links are checked or ignored; an
+entry whose post or expiry date passes shows up within those 10 minutes.
+
+Only the links that may have a problem are read from the database: a link to a live page of the site itself without an
+anchor never leaves it, so the report stays fast on large sites.
 
 Links to entries are stored by ID (`{entry:12@1:url}`), so renaming an entry or changing its URL doesn't break them. Only
 links typed as a URL break when a page moves. Those are matched against the URIs of the live entries, the routes and the

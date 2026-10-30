@@ -115,13 +115,18 @@ class Urls extends Component
     public function check(array $items, ?callable $progress = null, bool $force = false): void
     {
         $items = array_values($items);
+        $stored = false;
         foreach ($items as $i => $item) {
             if ($force || $this->isDue($item['urlHash'])) {
                 $this->store($item, $this->request(LinkParser::normalizeUrl($item['url'])));
+                $stored = true;
             }
             if ($progress) {
                 $progress($i + 1, count($items));
             }
+        }
+        if ($stored) {
+            Report::invalidate();
         }
     }
 

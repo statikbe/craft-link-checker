@@ -1,24 +1,33 @@
 {# Links panel in an entry's sidebar (LinkChecker::sidebarHtml(), settings → panel): the problems of the page as it's edited.
-   Collapsible; the state is remembered in the browser (web/assets/cp/dist/panel.js). #}
-<fieldset id="lc-panel" class="lc-panel" data-site-id="{{ entry.siteId }}">
+   Collapsible; the state is remembered in the browser (web/assets/cp/dist/panel.js). The ids are unique, so a panel in a
+   slideout works next to the one of the page. A slideout namespaces the ids, so the script finds it by data-lc-panel. #}
+{% set panelId = 'lc-panel-' ~ entry.id ~ '-' ~ random() %}
+<fieldset id="{{ panelId }}" class="lc-panel" data-lc-panel="{{ panelId }}" data-site-id="{{ entry.siteId }}">
     <legend class="h6 lc-panel__legend">
-        <button type="button" class="lc-panel__toggle" aria-expanded="true" aria-controls="lc-panel-body">
+        <button type="button" class="lc-panel__toggle" aria-expanded="true" aria-controls="{{ panelId }}-body">
             <span class="lc-panel__chevron" aria-hidden="true"></span>
             <span>{{ 'Links'|t('link-checker') }}</span>
             <span class="lc-panel__summary" data-panel-summary></span>
         </button>
     </legend>
-    <div id="lc-panel-body" class="meta lc-panel__body">
+    <div id="{{ panelId }}-body" class="meta lc-panel__body">
         {% include 'link-checker/_panel/list' %}
     </div>
 </fieldset>
 <script>
-    {# Collapse before the page paints, so a collapsed panel doesn't flash open #}
-    try {
-        if (localStorage.getItem('linkChecker.panel.collapsed') === '1') {
-            const panel = document.getElementById('lc-panel');
-            panel.classList.add('is-collapsed');
-            panel.querySelector('.lc-panel__toggle').setAttribute('aria-expanded', 'false');
+    {# Collapse before the page paints, so a collapsed panel doesn't flash open; then set it up (now, or once panel.js is loaded) #}
+    (function(id) {
+        try {
+            if (localStorage.getItem('linkChecker.panel.collapsed') === '1') {
+                const panel = document.querySelector('[data-lc-panel="' + id + '"]');
+                panel.classList.add('is-collapsed');
+                panel.querySelector('.lc-panel__toggle').setAttribute('aria-expanded', 'false');
+            }
+        } catch (e) {}
+        if (window.LinkCheckerPanel) {
+            window.LinkCheckerPanel.init(id);
+        } else {
+            (window.LinkCheckerPanels = window.LinkCheckerPanels || []).push(id);
         }
-    } catch (e) {}
+    })({{ panelId|json_encode|raw }});
 </script>

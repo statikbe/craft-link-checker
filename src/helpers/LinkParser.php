@@ -87,6 +87,10 @@ class LinkParser
     public static function normalizeUrl(string $url): string
     {
         $url = trim(explode('#', $url, 2)[0]);
+        // A protocol-relative URL (//example.org/…) is requested over https
+        if (str_starts_with($url, '//')) {
+            $url = 'https:' . $url;
+        }
         if (preg_match('#^(https?)://([^/?]+)(.*)$#i', $url, $m)) {
             return strtolower($m[1]) . '://' . strtolower($m[2]) . ($m[3] === '' ? '/' : $m[3]);
         }

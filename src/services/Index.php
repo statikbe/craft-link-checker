@@ -9,24 +9,27 @@ use craft\db\Query;
 use craft\elements\Entry;
 use craft\elements\GlobalSet;
 use craft\helpers\Db;
+use craft\helpers\Queue;
 use craft\helpers\StringHelper;
 use statikbe\linkchecker\helpers\LinkParser;
+use statikbe\linkchecker\jobs\IndexPagesJob;
 use statikbe\linkchecker\LinkChecker;
 
 /**
- * The links table: the links of every page, per site. A page is read again when it (or a block on it) is saved, once per
- * request and for every site. A link's target isn't watched: whether it's broken is worked out when the report is read.
+ * The links table: the links of every page, per site. A page is read again when it (or a block on it) is saved, in a queue
+ * job pushed once per request, for every site. A link's target isn't watched: whether it's broken is worked out when the
+ * report is read.
  */
 class Index extends Component
 {
     public const TABLE = '{{%linkchecker_links}}';
     public const ANCHORS_TABLE = '{{%linkchecker_anchors}}';
 
-    /** @var array<int, true> pages to read again at the end of the request */
+    /** @var array<int, true> pages to read again after the request */
     private array $pending = [];
 
     /**
-     * After an entry or global set is saved: the page it's on is read again at the end of the request. Not for drafts,
+     * After an entry or global set is saved: the page it's on is read again in a queue job, pushed at the end of the request. Not for drafts,
      * revisions, resaving (`craft resave`, a project config change) or propagation to other sites: the page is read in
      * every site anyway.
      */
@@ -40,7 +43,7 @@ class Index extends Component
             return;
         }
         if (!$this->pending) {
-            Craft::$app->onAfterRequest(fn() => $this->indexPending());
+            Craft::$app->onAfterRequest(fn() => $this->queuePending());
         }
         $this->pending[(int)$page->id] = true;
     }
@@ -54,6 +57,7 @@ class Index extends Component
         if ($page && !$entry->getIsDraft() && !$entry->getIsRevision()) {
             Db::delete(self::TABLE, ['sourceId' => $entry->id]);
             Db::delete(self::ANCHORS_TABLE, ['pageId' => $entry->id]);
+            Report::invalidate();
         }
     }
 
@@ -125,21 +129,31 @@ class Index extends Component
         return !(new Query())->from(self::TABLE)->exists();
     }
 
-    private function indexPending(): void
+    /**
+     * Pushes the job that reads the pages saved in this request. A failure is logged: it never fails a save that's done.
+     */
+    private function queuePending(): void
     {
-        $pending = array_keys($this->pending);
+        $ids = array_keys($this->pending);
         $this->pending = [];
-        foreach ($pending as $id) {
-            try {
-                $this->index($id);
-            } catch (\Throwable $e) {
-                Craft::error("Couldn't read the links of entry {$id}: {$e->getMessage()}", __METHOD__);
-            }
-        }
-        // New domains and external URLs are checked in queue jobs, not in the editor's request
         try {
-            LinkChecker::getInstance()->getHosts()->queueIfDue();
-            LinkChecker::getInstance()->getUrls()->queueIfDue();
+            Queue::push(new IndexPagesJob(['ids' => $ids]));
+        } catch (\Throwable $e) {
+            Craft::error("Couldn't queue reading the links of elements " . implode(', ', $ids) . ": {$e->getMessage()}", __METHOD__);
+        }
+    }
+
+    /**
+     * After pages were read (a job, a rebuild): the report is read again, and new domains and external URLs are checked in
+     * queue jobs.
+     */
+    public function indexed(): void
+    {
+        Report::invalidate();
+        $plugin = LinkChecker::getInstance();
+        try {
+            $plugin->getHosts()->queueIfDue();
+            $plugin->getUrls()->queueIfDue();
         } catch (\Throwable $e) {
             Craft::error("Couldn't queue the external link checks: {$e->getMessage()}", __METHOD__);
         }

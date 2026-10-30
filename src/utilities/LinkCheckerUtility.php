@@ -37,22 +37,22 @@ class LinkCheckerUtility extends Utility
             'siteId' => (int)$request->getQueryParam('siteId', 0),
             'q' => trim((string)$request->getQueryParam('q', '')),
         ];
-        $problems = self::filtered($plugin->getReport()->problems(), $filters);
+        $problems = self::filtered($plugin->getReport()->cachedProblems(), $filters);
+        $total = count($problems);
+        $problems = array_slice($problems, 0, 500);
 
         $sites = Craft::$app->getSites();
-        $editUrls = [];
+        $editUrls = $plugin->getReport()->editUrls($problems);
         foreach ($problems as &$problem) {
-            $key = $problem['sourceId'] . '-' . $problem['siteId'];
-            $editUrls[$key] ??= $plugin->getReport()->editUrl((int)$problem['sourceId'], (int)$problem['siteId']);
-            $problem['editUrl'] = $editUrls[$key];
+            $problem['editUrl'] = $editUrls[$problem['sourceId'] . '-' . $problem['siteId']];
             $problem['site'] = $sites->getSiteById((int)$problem['siteId'], true)?->getName() ?? '';
             $problem['reasonLabel'] = Report::reasonLabel((string)$problem['reason']);
         }
         unset($problem);
 
         return Craft::$app->getView()->renderTemplate('link-checker/_utility/index', [
-            'problems' => array_slice($problems, 0, 500),
-            'total' => count($problems),
+            'problems' => $problems,
+            'total' => $total,
             'filters' => $filters,
             'sites' => $sites->getAllSites(true),
             'ignored' => $plugin->getIgnores()->all(),

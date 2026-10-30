@@ -10,11 +10,13 @@ use craft\base\Plugin;
 use craft\elements\Entry;
 use craft\elements\GlobalSet;
 use craft\events\DefineHtmlEvent;
+use craft\events\ElementEvent;
 use craft\events\ModelEvent;
 use craft\events\RegisterComponentTypesEvent;
 use craft\events\RegisterTemplateRootsEvent;
 use craft\helpers\Queue;
 use craft\services\Dashboard;
+use craft\services\Elements;
 use craft\services\Utilities;
 use craft\web\View;
 use statikbe\linkchecker\jobs\RebuildJob;
@@ -39,7 +41,7 @@ use yii\base\Event;
  */
 class LinkChecker extends Plugin
 {
-    public string $schemaVersion = '1.2.1';
+    public string $schemaVersion = '1.3.0';
 
     public static function config(): array
     {
@@ -77,6 +79,16 @@ class LinkChecker extends Plugin
                 /** @var ElementInterface $element */
                 $element = $event->sender;
                 $this->getIndex()->forget($element);
+            });
+        }
+
+        // A link's target changed (saved, deleted, restored): the cached report is read again
+        foreach ([Elements::EVENT_AFTER_SAVE_ELEMENT, Elements::EVENT_AFTER_DELETE_ELEMENT, Elements::EVENT_AFTER_RESTORE_ELEMENT] as $name) {
+            Event::on(Elements::class, $name, function(ElementEvent $event) {
+                // One cache write: cheap, also during a resave
+                if (!$event->element->getIsDraft() && !$event->element->getIsRevision()) {
+                    Report::invalidate();
+                }
             });
         }
 

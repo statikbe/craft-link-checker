@@ -83,6 +83,7 @@ class RebuildController extends Controller
                 Console::endProgress();
             }
         }
+        \statikbe\linkchecker\services\Report::invalidate();
         $this->stdout("\n");
         return $this->run('/link-checker/report');
     }

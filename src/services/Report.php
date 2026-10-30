@@ -6,11 +6,15 @@ use Craft;
 use craft\base\Component;
 use craft\db\Query;
 use craft\db\Table;
+use craft\elements\Entry;
+use craft\elements\GlobalSet;
 use craft\elements\User;
 use craft\helpers\Db;
 use statikbe\linkchecker\helpers\LinkParser;
 use statikbe\linkchecker\LinkChecker;
 use statikbe\linkchecker\models\Settings;
+use yii\caching\TagDependency;
+use yii\db\Expression;
 
 /**
  * Which links are broken, worked out from the targets' current state each time the report is read (deleted, in the trash,
@@ -25,6 +29,9 @@ class Report extends Component
 {
     public const BROKEN = 'broken';
     public const WARNING = 'warning';
+
+    private const CACHE_TAG = 'linkchecker:report';
+    private const CACHE_DURATION = 600;
 
     /** Reasons per severity */
     public const REASONS = [
@@ -57,7 +64,7 @@ class Report extends Component
     public function pages(bool $warnings = false, ?User $user = null): array
     {
         $pages = [];
-        foreach ($this->problems($user) as $link) {
+        foreach ($this->cachedProblems($user) as $link) {
             if ($link['severity'] === self::WARNING && !$warnings) {
                 continue;
             }
@@ -92,7 +99,34 @@ class Report extends Component
     }
 
     /**
-     * Every link with a problem, with its reason and severity.
+     * Every link with a problem (problems()), cached per user for a few minutes. The cache is cleared when pages are read
+     * again, external links or domains are checked, a link is ignored, or an element is saved, deleted or restored.
+     *
+     * @return array<array<string, mixed>>
+     */
+    public function cachedProblems(?User $user = null): array
+    {
+        $key = 'linkchecker:problems:' . ($user === null || $user->admin ? 'all' : $user->id);
+        $cache = Craft::$app->getCache();
+        $problems = $cache->get($key);
+        if (!is_array($problems)) {
+            $problems = $this->problems($user);
+            $cache->set($key, $problems, self::CACHE_DURATION, new TagDependency(['tags' => [self::CACHE_TAG]]));
+        }
+        return $problems;
+    }
+
+    /**
+     * Clears the cached report (cachedProblems()).
+     */
+    public static function invalidate(): void
+    {
+        TagDependency::invalidate(Craft::$app->getCache(), self::CACHE_TAG);
+    }
+
+    /**
+     * Every link with a problem, with its reason and severity. Only the links that may have one are read: a link to an
+     * own-site URL of a live page without an anchor never reaches PHP.
      *
      * @return array<array<string, mixed>>
      */
@@ -103,9 +137,30 @@ class Report extends Component
         $settings = LinkChecker::getInstance()->getSettings();
         $crossSite = $settings->crossSiteLinks === 'warning';
 
+        $db = Craft::$app->getDb();
+        // A live element at the URI of an own-site URL (case-insensitive, as Craft matches URIs)
+        $uriMatch = $db->getIsPgsql() ? 'lower([[lv.uri]]) = lower([[l.uri]])' : '[[lv.uri]] = [[l.uri]]';
+        $livePage = (new Query())
+            ->select(new Expression('1'))
+            ->from(['lv' => Table::ELEMENTS_SITES])
+            ->innerJoin(['lve' => Table::ELEMENTS], '[[lve.id]] = [[lv.elementId]]')
+            ->leftJoin(['lven' => Table::ENTRIES], '[[lven.id]] = [[lv.elementId]]')
+            ->where("[[lv.siteId]] = [[l.targetSiteId]] AND $uriMatch")
+            ->andWhere([
+                'lv.enabled' => true,
+                'lve.enabled' => true,
+                'lve.archived' => false,
+                'lve.dateDeleted' => null,
+                'lve.draftId' => null,
+                'lve.revisionId' => null,
+            ])
+            ->andWhere(['or', ['lven.postDate' => null], ['<=', 'lven.postDate', $now]])
+            ->andWhere(['or', ['lven.expiryDate' => null], ['>', 'lven.expiryDate', $now]]);
+
         $query = (new Query())
             ->select([
-                'l.*',
+                'l.sourceId', 'l.siteId', 'l.location', 'l.kind', 'l.targetId', 'l.targetSiteId', 'l.uri', 'l.url', 'l.suffix',
+                'l.label', 'l.issue', 'l.fallbackUri', 'l.fallbackSiteId', 'l.host',
                 'sourceTitle' => 'coalesce([[ses.title]], [[gs.name]])',
                 'targetElementId' => 'te.id', 'targetDeleted' => 'te.dateDeleted', 'targetEnabled' => 'te.enabled',
                 'targetArchived' => 'te.archived', 'targetSiteRow' => 'tes.id', 'targetSiteEnabled' => 'tes.enabled',
@@ -138,7 +193,7 @@ class Report extends Component
                 $settings->checkAnchors ? ['not', ['l.suffix' => null]] : '1 = 0',
                 $settings->checkDomains ? ['h.resolves' => false] : '1 = 0',
                 $settings->checkExternal ? ['u.status' => [Urls::BROKEN, Urls::REDIRECT]] : '1 = 0',
-                ['l.kind' => LinkParser::KIND_URL],
+                ['and', ['l.kind' => LinkParser::KIND_URL], ['not exists', $livePage]],
                 ['and',
                     ['l.kind' => $elementKinds],
                     ['or',
@@ -161,12 +216,11 @@ class Report extends Component
             $query->andWhere(['l.sourceId' => $sourceId]);
         }
         if ($user !== null && !$user->admin) {
-            $sections = $this->editableSectionIds($user);
-            $globalSets = $this->editableGlobalSetIds($user);
-            if (!$sections && !$globalSets) {
+            $condition = $this->editableCondition($user);
+            if ($condition === null) {
                 return [];
             }
-            $query->andWhere(['or', ['sen.sectionId' => $sections ?: [0]], ['gs.id' => $globalSets ?: [0]]]);
+            $query->andWhere($condition);
         }
 
         return $this->judge($query->all());
@@ -564,19 +618,80 @@ class Report extends Component
     }
 
     /**
-     * The sections whose entries the user may edit.
+     * The pages a user may edit, as a condition on the report's query: entries in sections where they may save other
+     * people's entries, their own entries where they may only save their own, the global sets they may edit, and only in the
+     * sites they may edit. Null when there are none.
      *
-     * @return int[]
+     * @return array<mixed>|null
      */
-    private function editableSectionIds(User $user): array
+    private function editableCondition(User $user): ?array
     {
-        $ids = [];
+        $peer = [];
+        $own = [];
         foreach (Craft::$app->getEntries()->getAllSections() as $section) {
-            if ($user->can("saveEntries:$section->uid") || $user->can("savePeerEntries:$section->uid")) {
-                $ids[] = (int)$section->id;
+            if ($user->can("savePeerEntries:$section->uid")) {
+                $peer[] = (int)$section->id;
+            } elseif ($user->can("saveEntries:$section->uid")) {
+                $own[] = (int)$section->id;
             }
         }
-        return $ids;
+        $globalSets = $this->editableGlobalSetIds($user);
+        if (!$peer && !$own && !$globalSets) {
+            return null;
+        }
+        $authored = (new Query())
+            ->select(new Expression('1'))
+            ->from(['ea' => Table::ENTRIES_AUTHORS])
+            ->where('[[ea.entryId]] = [[l.sourceId]]')
+            ->andWhere(['ea.authorId' => $user->id]);
+        $condition = ['or',
+            ['sen.sectionId' => $peer ?: [0]],
+            ['and', ['sen.sectionId' => $own ?: [0]], ['exists', $authored]],
+            ['gs.id' => $globalSets ?: [0]],
+        ];
+        if (Craft::$app->getIsMultiSite()) {
+            $sites = [];
+            foreach (Craft::$app->getSites()->getAllSites(true) as $site) {
+                if ($user->can("editSite:$site->uid")) {
+                    $sites[] = (int)$site->id;
+                }
+            }
+            if (!$sites) {
+                return null;
+            }
+            $condition = ['and', $condition, ['l.siteId' => $sites]];
+        }
+        return $condition;
+    }
+
+    /**
+     * The edit URLs of these pages in their sites, in a few queries: ['sourceId-siteId' => url].
+     *
+     * @param array<array{sourceId: int|string, siteId: int|string}> $pages
+     * @return array<string, string|null>
+     */
+    public function editUrls(array $pages): array
+    {
+        $bySite = [];
+        foreach ($pages as $page) {
+            $bySite[(int)$page['siteId']][(int)$page['sourceId']] = true;
+        }
+        $urls = [];
+        foreach ($bySite as $siteId => $ids) {
+            foreach (array_chunk(array_keys($ids), 500) as $chunk) {
+                $elements = array_merge(
+                    Entry::find()->id($chunk)->siteId($siteId)->status(null)->all(),
+                    GlobalSet::find()->id($chunk)->siteId($siteId)->all(),
+                );
+                foreach ($elements as $element) {
+                    $urls[$element->id . '-' . $siteId] = $element->getCpEditUrl();
+                }
+            }
+        }
+        foreach ($pages as $page) {
+            $urls[$page['sourceId'] . '-' . $page['siteId']] ??= null;
+        }
+        return $urls;
     }
 
     /**

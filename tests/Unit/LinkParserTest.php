@@ -73,6 +73,7 @@ it('finds the anchors HTML defines and the anchor of a suffix', function() {
 it('normalizes external URLs: no fragment, lowercase scheme and host, a path', function() {
     expect(LinkParser::normalizeUrl('HTTPS://Example.ORG/Page?a=1#top'))->toBe('https://example.org/Page?a=1')
         ->and(LinkParser::normalizeUrl('https://example.org'))->toBe('https://example.org/')
+        ->and(LinkParser::normalizeUrl('//Example.org/x'))->toBe('https://example.org/x')
         ->and(LinkParser::classify('https://www.statik.be/team', 1, [['id' => 1, 'baseUrl' => 'https://example.be/']])['host'])->toBe('www.statik.be');
 });
 

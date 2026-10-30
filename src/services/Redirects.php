@@ -15,8 +15,15 @@ class Redirects extends Component
     /** @var array<array{siteId: int|null, pattern: string, match: string, regex: bool}>|null */
     private ?array $redirects = null;
 
+    /** @var array<string, true>|null exact redirects: 'match|siteId|lowercase pattern' (siteId '' for every site) */
+    private ?array $exact = null;
+
+    /** @var array<array{siteId: int|null, pattern: string, match: string, regex: bool}> */
+    private array $regex = [];
+
     /**
-     * Whether a redirect catches this URL (absolute) in this site.
+     * Whether a redirect catches this URL (absolute) in this site. Exact redirects are looked up, only the regular expressions
+     * are tried one by one.
      */
     public function matches(string $url, int $siteId): bool
     {
@@ -31,19 +38,45 @@ class Redirects extends Component
             'pathWithoutParams' => [$path, rtrim($path, '/') ?: '/'],
             'url' => [explode('#', $url)[0]],
         ];
-        foreach ($this->all() as $redirect) {
+        $this->index();
+        foreach ($candidates as $match => $values) {
+            foreach ($values as $candidate) {
+                $candidate = mb_strtolower($candidate);
+                if (isset($this->exact["$match||$candidate"]) || isset($this->exact["$match|$siteId|$candidate"])) {
+                    return true;
+                }
+            }
+        }
+        foreach ($this->regex as $redirect) {
             if ($redirect['siteId'] !== null && $redirect['siteId'] !== $siteId) {
                 continue;
             }
             foreach ($candidates[$redirect['match']] ?? $candidates['path'] as $candidate) {
-                if ($redirect['regex']
-                    ? @preg_match('`' . str_replace('`', '\`', $redirect['pattern']) . '`i', $candidate) === 1
-                    : strcasecmp($redirect['pattern'], $candidate) === 0) {
+                if (@preg_match('`' . str_replace('`', '\`', $redirect['pattern']) . '`i', $candidate) === 1) {
                     return true;
                 }
             }
         }
         return false;
+    }
+
+    /**
+     * Splits the redirects into a lookup of the exact ones and a list of the regular expressions.
+     */
+    private function index(): void
+    {
+        if ($this->exact !== null) {
+            return;
+        }
+        $this->exact = [];
+        foreach ($this->all() as $redirect) {
+            if ($redirect['regex']) {
+                $this->regex[] = $redirect;
+            } else {
+                $match = isset(['path' => 1, 'pathWithoutParams' => 1, 'url' => 1][$redirect['match']]) ? $redirect['match'] : 'path';
+                $this->exact[$match . '|' . ($redirect['siteId'] ?? '') . '|' . mb_strtolower($redirect['pattern'])] = true;
+            }
+        }
     }
 
     /**

@@ -1,5 +1,18 @@
 # Release Notes for Link Checker
 
+## 1.3.0 - 2026-10-31
+
+### Changed
+- Saved pages are read in a queue job after the save, not before the editor's response is sent; the domain and URL checks are queued from that job
+- The report is faster and uses less memory on large sites: links to live pages of the site itself are filtered out in the database, only the columns that are shown are read, exact redirects are looked up instead of compared one by one, and edit URLs are fetched in a few queries for the shown pages only
+- The report is cached for up to 10 minutes per user, and cleared when an element is saved, deleted or restored, pages are read, or links are checked or ignored
+- The widget only lists other people's entries to users who may save them (`savePeerEntries`), and only in the sites the user may edit
+
+### Fixed
+- Protocol-relative links (`//example.org/…`) are checked over https (their pages are read again after the update)
+- The Links panel endpoint checks the user may edit the entry's site, and doesn't show someone else's unsaved changes
+- The Links panel in a slideout (an entry opened from another page) works: collapse, refresh and Ignore
+
 ## 1.2.1 - 2026-10-30
 
 ### Fixed

@@ -107,13 +107,18 @@ class Hosts extends Component
             return false;
         }
         $hosts = array_values($hosts);
+        $stored = false;
         foreach ($hosts as $i => $host) {
             if ($this->isDue($host)) {
                 $this->store($host, self::resolves($host));
+                $stored = true;
             }
             if ($progress) {
                 $progress($i + 1, count($hosts));
             }
+        }
+        if ($stored) {
+            Report::invalidate();
         }
         return true;
     }

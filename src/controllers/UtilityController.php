@@ -27,15 +27,14 @@ class UtilityController extends Controller
             'siteId' => (int)$this->request->getQueryParam('siteId', 0),
             'q' => trim((string)$this->request->getQueryParam('q', '')),
         ];
-        $problems = LinkCheckerUtility::filtered($plugin->getReport()->problems(), $filters);
+        $problems = LinkCheckerUtility::filtered($plugin->getReport()->cachedProblems(), $filters);
         $sites = Craft::$app->getSites();
 
         $handle = fopen('php://temp', 'r+');
         fputcsv($handle, ['Page', 'Site', 'Edit URL', 'Location', 'Link', 'Target', 'Severity', 'Reason'], escape: '');
-        $editUrls = [];
+        $editUrls = $plugin->getReport()->editUrls($problems);
         foreach ($problems as $problem) {
             $key = $problem['sourceId'] . '-' . $problem['siteId'];
-            $editUrls[$key] ??= $plugin->getReport()->editUrl((int)$problem['sourceId'], (int)$problem['siteId']);
             fputcsv($handle, array_map([self::class, 'csvCell'], [
                 $problem['sourceTitle'],
                 $sites->getSiteById((int)$problem['siteId'], true)?->getName() ?? '',

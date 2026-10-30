@@ -1,16 +1,17 @@
 /**
- * Links panel in an entry’s sidebar (src/templates/_panel/panel.twig): collapses and remembers
- * that in the browser, for every entry, and reloads its list after the editor saves a draft (an autosave), or after a column
- * is saved in a slideout.
+ * Links panel in an entry’s sidebar (src/templates/_panel/panel.twig): collapses and remembers that in the browser, for
+ * every entry, and reloads its list after the editor saves a draft (an autosave), or after a column is saved in a
+ * slideout. Every panel is set up on its own, also one in a slideout next to the page's.
  */
 (function($) {
     const KEY = 'linkChecker.panel.collapsed';
 
-    $(() => {
-        const panel = document.getElementById('lc-panel');
-        if (!panel) {
+    const init = (id) => {
+        const panel = document.querySelector(`[data-lc-panel="${id}"]`);
+        if (!panel || panel.dataset.lcReady) {
             return;
         }
+        panel.dataset.lcReady = '1';
         const toggle = panel.querySelector('.lc-panel__toggle');
         const body = panel.querySelector('.lc-panel__body');
         const summary = panel.querySelector('[data-panel-summary]');
@@ -44,6 +45,9 @@
         const editorOf = () => $(panel).closest('form').data('elementEditor');
 
         const refresh = (elementId) => {
+            if (!document.body.contains(panel)) {
+                return;
+            }
             const editor = editorOf();
             Craft.sendActionRequest('POST', 'link-checker/panel/list', {
                 data: {elementId: elementId ?? editor?.settings.elementId, siteId: panel.dataset.siteId},
@@ -75,5 +79,11 @@
         if (Craft.CpScreenSlideout) {
             Garnish.on(Craft.CpScreenSlideout, 'submit', () => setTimeout(() => refresh(), 500));
         }
+    };
+
+    window.LinkCheckerPanel = {init};
+    $(() => {
+        (window.LinkCheckerPanels || []).forEach(init);
+        window.LinkCheckerPanels = [];
     });
 })(jQuery);

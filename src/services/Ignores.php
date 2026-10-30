@@ -31,12 +31,14 @@ class Ignores extends Component
             'dateCreated' => Db::prepareDateForDb(new \DateTime()),
         ]);
         $this->hashes = null;
+        Report::invalidate();
     }
 
     public function remove(int $id): void
     {
         Db::delete(self::TABLE, ['id' => $id]);
         $this->hashes = null;
+        Report::invalidate();
     }
 
     public function isIgnored(string $url): bool

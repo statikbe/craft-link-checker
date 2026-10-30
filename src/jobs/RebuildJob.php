@@ -55,8 +55,7 @@ class RebuildJob extends BaseBatchedJob
      */
     protected function after(): void
     {
-        LinkChecker::getInstance()->getHosts()->queueIfDue();
-        LinkChecker::getInstance()->getUrls()->queueIfDue();
+        LinkChecker::getInstance()->getIndex()->indexed();
     }
 
     protected function defaultDescription(): ?string

@@ -54,12 +54,13 @@ class BrokenLinks extends Widget
         $pages = $report->pages($this->showWarnings, Craft::$app->getUser()->getIdentity());
         $sites = Craft::$app->getSites();
         $shown = array_slice($pages, 0, $this->limit);
+        $urls = $report->editUrls($shown);
         foreach ($shown as &$page) {
             foreach ($page['links'] as &$link) {
                 $link['reasonLabel'] = Report::reasonLabel((string)$link['reason']);
             }
             unset($link);
-            $page['url'] = $report->editUrl($page['sourceId'], $page['siteId']);
+            $page['url'] = $urls[$page['sourceId'] . '-' . $page['siteId']];
             $page['site'] = $sites->getSiteById($page['siteId'], true)?->getName() ?? '';
         }
         unset($page);
