@@ -1,0 +1,18 @@
+{% import '_includes/forms' as forms %}
+{{ forms.textField({
+    label: 'Number of pages'|t('link-checker'),
+    instructions: 'The other pages are only counted.'|t('link-checker'),
+    id: 'limit',
+    name: 'limit',
+    type: 'number',
+    min: 1,
+    value: widget.limit,
+    errors: widget.getErrors('limit'),
+}) }}
+{{ forms.lightswitchField({
+    label: 'Show warnings'|t('link-checker'),
+    instructions: 'Also list links to entries that aren’t published yet, invalid email addresses and phone numbers, and anchors that aren’t found.'|t('link-checker'),
+    id: 'showWarnings',
+    name: 'showWarnings',
+    on: widget.showWarnings,
+}) }}

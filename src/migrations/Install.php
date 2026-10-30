@@ -1,0 +1,66 @@
+<?php
+
+namespace statikbe\linkchecker\migrations;
+
+use craft\db\Migration;
+use craft\db\Table;
+use statikbe\linkchecker\services\Index;
+
+/**
+ * The links table: one row per link per page and site. Whether a link is broken isn't stored: it's worked out when the
+ * report is read, from the target's current state (Report).
+ */
+class Install extends Migration
+{
+    public function safeUp(): bool
+    {
+        if ($this->db->tableExists(Index::TABLE)) {
+            return true;
+        }
+        $this->createTable(Index::TABLE, [
+            'id' => $this->primaryKey(),
+            'sourceId' => $this->integer()->notNull(),
+            'siteId' => $this->integer()->notNull(),
+            'elementId' => $this->integer()->notNull(),
+            'fieldId' => $this->integer(),
+            'location' => $this->string(1000)->notNull()->defaultValue(''),
+            'kind' => $this->string(20)->notNull(),
+            'targetId' => $this->integer(),
+            'targetSiteId' => $this->integer(),
+            'uri' => $this->string(500),
+            'url' => $this->text()->notNull(),
+            'suffix' => $this->string(255),
+            'label' => $this->string(255),
+            'issue' => $this->string(50),
+            'fallbackUri' => $this->string(500),
+            'fallbackSiteId' => $this->integer(),
+            'dateCreated' => $this->dateTime()->notNull(),
+            'dateUpdated' => $this->dateTime()->notNull(),
+            'uid' => $this->uid(),
+        ]);
+        $this->createIndex(null, Index::TABLE, ['sourceId', 'siteId']);
+        $this->createIndex(null, Index::TABLE, ['targetId']);
+        $this->createIndex(null, Index::TABLE, ['kind']);
+        $this->addForeignKey(null, Index::TABLE, ['sourceId'], Table::ELEMENTS, ['id'], 'CASCADE');
+        $this->addForeignKey(null, Index::TABLE, ['siteId'], Table::SITES, ['id'], 'CASCADE');
+
+        // The anchors each page defines (ids in its content, Entry Anchors fields); '' marks a page that was read
+        $this->createTable(Index::ANCHORS_TABLE, [
+            'id' => $this->primaryKey(),
+            'pageId' => $this->integer()->notNull(),
+            'siteId' => $this->integer()->notNull(),
+            'anchor' => $this->string(255)->notNull(),
+        ]);
+        $this->createIndex(null, Index::ANCHORS_TABLE, ['pageId', 'siteId', 'anchor']);
+        $this->addForeignKey(null, Index::ANCHORS_TABLE, ['pageId'], Table::ELEMENTS, ['id'], 'CASCADE');
+        $this->addForeignKey(null, Index::ANCHORS_TABLE, ['siteId'], Table::SITES, ['id'], 'CASCADE');
+        return true;
+    }
+
+    public function safeDown(): bool
+    {
+        $this->dropTableIfExists(Index::ANCHORS_TABLE);
+        $this->dropTableIfExists(Index::TABLE);
+        return true;
+    }
+}

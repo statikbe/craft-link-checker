@@ -1,0 +1,61 @@
+{# Broken links widget (src/widgets/BrokenLinks.php): pages = [{title, url, site, broken, warnings, links}], total, brokenTotal #}
+{% set reasons = {
+    'deleted': 'Deleted'|t('link-checker'),
+    'trashed': 'In the trash'|t('link-checker'),
+    'disabled': 'Disabled'|t('link-checker'),
+    'not-in-site': 'Not in this site'|t('link-checker'),
+    'expired': 'Expired'|t('link-checker'),
+    'no-url': 'Has no page of its own'|t('link-checker'),
+    'page-not-found': 'Page not found'|t('link-checker'),
+    'redirected': 'Redirected: better to link to the page itself'|t('link-checker'),
+    'anchor-missing': 'Anchor not found on the page'|t('link-checker'),
+    'pending': 'Not published yet'|t('link-checker'),
+    'deleted-fallback': 'Deleted, but the link still works through its saved URL'|t('link-checker'),
+    'other-site': 'In another language'|t('link-checker'),
+    'invalid-email': 'Invalid email address'|t('link-checker'),
+    'invalid-phone': 'Invalid phone number'|t('link-checker'),
+} %}
+{% if not indexed %}
+    <p class="light">{{ 'The links of the pages are being read. Refresh in a moment, or run {command}.'|t('link-checker', { command: '<code>craft link-checker/rebuild</code>' })|raw }}</p>
+{% elseif pages is empty %}
+    <p class="light">{{ 'No pages with broken links.'|t('link-checker') }}</p>
+{% else %}
+    <p class="light">
+        {%- if brokenTotal -%}
+            {{ '{count, plural, =1{# broken link} other{# broken links}}'|t('link-checker', { count: brokenTotal }) }}
+        {%- else -%}
+            {{ 'No broken links, only warnings.'|t('link-checker') }}
+        {%- endif -%}
+    </p>
+    <ul style="list-style: none; padding: 0; margin: 0;">
+        {% for page in pages %}
+            <li style="padding: 8px 0;{% if not loop.first %} border-top: 1px solid var(--hairline-color);{% endif %}">
+                {% if page.url %}<a href="{{ page.url }}"><strong>{{ page.title }}</strong></a>{% else %}<strong>{{ page.title }}</strong>{% endif %}
+                {% if multiSite %}<span class="light"> · {{ page.site }}</span>{% endif %}
+                <details style="margin-top: 4px;">
+                    <summary class="light" style="cursor: pointer;">
+                        {%- if page.broken -%}
+                            {{ '{count, plural, =1{# broken link} other{# broken links}}'|t('link-checker', { count: page.broken }) }}
+                        {%- endif -%}
+                        {%- if page.broken and page.warnings %} · {% endif -%}
+                        {%- if page.warnings -%}
+                            {{ '{count, plural, =1{# warning} other{# warnings}}'|t('link-checker', { count: page.warnings }) }}
+                        {%- endif -%}
+                    </summary>
+                    <ul style="list-style: disc; padding-inline-start: 20px; margin-top: 4px;">
+                        {% for link in page.links %}
+                            <li>
+                                <span style="color: {{ link.severity == 'broken' ? 'var(--error-color)' : 'var(--notice-color, #b45309)' }};">{{ reasons[link.reason] ?? link.reason }}</span>:
+                                {{ link.targetTitle ?? link.label ?? link.url }}
+                                <span class="light">({{ link.location }})</span>
+                            </li>
+                        {% endfor %}
+                    </ul>
+                </details>
+            </li>
+        {% endfor %}
+    </ul>
+    {% if total > pages|length %}
+        <p class="light">{{ 'And {count} more. Run {command} for the full list.'|t('link-checker', { count: total - pages|length, command: '<code>craft link-checker/report</code>' })|raw }}</p>
+    {% endif %}
+{% endif %}
