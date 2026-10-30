@@ -67,24 +67,56 @@ class Checker extends Component
         }
 
         // The control panel draws the blocks from the fields' cached results after a failed save, or queries them again when
-        // they weren't posted (unchanged): cache them, so it draws the ones that get the errors
-        $cached = false;
+        // they weren't posted (unchanged): cache them, so it draws the ones that get the errors, and put the errors on those
+        // (by uid), without reading the page again
+        $drawn = [];
         foreach ($broken as $link) {
             $first = $link['chain'][0]['field'] ?? null;
-            if ($first !== null) {
+            if ($first !== null && !isset($drawn[$first])) {
+                $drawn[$first] = [];
                 $value = $entry->getFieldValue($first);
-                if ($value instanceof ElementQueryInterface && $value->getCachedResult() === null) {
-                    $value->setCachedResult((clone $value)->drafts(null)->savedDraftsOnly()->status(null)->limit(null)->all());
-                    $cached = true;
+                if ($value instanceof ElementQueryInterface) {
+                    $cached = $value->getCachedResult();
+                    if ($cached === null) {
+                        $cached = (clone $value)->drafts(null)->savedDraftsOnly()->status(null)->limit(null)->all();
+                        $value->setCachedResult($cached);
+                    }
+                    foreach ($cached as $element) {
+                        if ($element->uid !== null) {
+                            $drawn[$first][$element->uid] = $element;
+                        }
+                    }
                 }
             }
         }
-        if ($cached) {
-            $broken = $this->broken($entry);
-        }
         foreach ($broken as $link) {
-            $this->placeError($link, $this->message($link));
+            $this->placeError(self::onDrawn($link, $drawn), $this->message($link));
         }
+    }
+
+    /**
+     * A link whose chain leads through the blocks the control panel draws: the block in the page's field (the second level)
+     * is replaced by the drawn one with the same uid. The levels below are drawn from fresh queries anyway; their errors are
+     * put back by uid (nestedErrors).
+     *
+     * @param array<string, mixed> $link
+     * @param array<string, array<string, ElementInterface>> $drawn the drawn blocks per field of the page, by uid
+     * @return array<string, mixed>
+     */
+    public static function onDrawn(array $link, array $drawn): array
+    {
+        $field = $link['chain'][0]['field'] ?? null;
+        $block = $link['chain'][1]['element'] ?? $link['element'];
+        $uid = $block->uid ?? null;
+        if ($field === null || $uid === null || !isset($drawn[$field][$uid])) {
+            return $link;
+        }
+        if (isset($link['chain'][1])) {
+            $link['chain'][1]['element'] = $drawn[$field][$uid];
+        } else {
+            $link['element'] = $drawn[$field][$uid];
+        }
+        return $link;
     }
 
     /**

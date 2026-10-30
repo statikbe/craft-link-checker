@@ -60,4 +60,5 @@ return [
     'Ignored links' => 'Genegeerde links',
     'No links are ignored. Ignore a link here or in the Links panel of a page: it’s no longer reported anywhere.' => 'Er worden geen links genegeerd. Negeer een link hier of in het paneel Links van een pagina: hij wordt dan nergens meer gemeld.',
     'Stop ignoring' => 'Niet meer negeren',
+    'Checking the links…' => 'Links controleren…',
 ];

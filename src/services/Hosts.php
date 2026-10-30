@@ -6,7 +6,6 @@ use Craft;
 use craft\base\Component;
 use craft\db\Query;
 use craft\helpers\Db;
-use craft\helpers\Queue;
 use statikbe\linkchecker\jobs\CheckHostsJob;
 use statikbe\linkchecker\LinkChecker;
 
@@ -15,6 +14,9 @@ use statikbe\linkchecker\LinkChecker;
  * 7 days, one that doesn't after a day). A domain only counts as not existing after two failed lookups at least an hour
  * apart: one failure can be a resolver that timed out. Only in a queue job or a console command, never in an editor's
  * request. The pages themselves aren't requested.
+ *
+ * Every domain has a row from the moment a page with it is read (checkedAt null, due at once); the queue job takes the due
+ * rows in order of their id, so it carries no list.
  */
 class Hosts extends Component
 {
@@ -32,35 +34,57 @@ class Hosts extends Component
 
     private const QUEUED_KEY = 'linkchecker:hosts-queued';
 
+    /** How long a host that refuses link checkers is left alone */
+    private const REFUSED_FOR = 'P14D';
+
     /**
-     * The domains of external links that weren't looked up yet, or not for a while.
-     *
-     * @return string[]
+     * The domains that weren't looked up yet or are due again, and that a page still links to. Ordered by id.
      */
-    public function due(): array
+    public function dueQuery(): Query
     {
-        $now = new \DateTime();
-        $ok = Db::prepareDateForDb((clone $now)->sub(new \DateInterval(self::RECHECK_OK)));
-        $failed = Db::prepareDateForDb((clone $now)->sub(new \DateInterval(self::RECHECK_FAILED)));
-        $firstFailure = Db::prepareDateForDb((clone $now)->sub(new \DateInterval(self::RECHECK_FIRST_FAILURE)));
         return (new Query())
-            ->select(['l.host'])
-            ->distinct()
-            ->from(['l' => Index::TABLE])
-            ->leftJoin(['h' => self::TABLE], '[[h.host]] = [[l.host]]')
-            ->where(['l.kind' => 'external'])
-            ->andWhere(['not', ['l.host' => null]])
-            ->andWhere(['or',
-                ['h.id' => null],
-                ['and', ['h.resolves' => true], ['<', 'h.checkedAt', $ok]],
-                ['and', ['h.resolves' => true], ['>', 'h.failures', 0], ['<', 'h.checkedAt', $firstFailure]],
-                ['and', ['h.resolves' => false], ['<', 'h.checkedAt', $failed]],
-            ])
-            ->column();
+            ->from(['h' => self::TABLE])
+            ->where(['<=', 'h.nextCheckAt', Db::prepareDateForDb(new \DateTime())])
+            ->andWhere(['exists', (new Query())->from(['l' => Index::TABLE])->where('[[l.host]] = [[h.host]]')])
+            ->orderBy(['h.id' => SORT_ASC]);
     }
 
     /**
-     * Pushes a queue job when domains are due, unless one is waiting already.
+     * The domains that are due (dueQuery()), after a row id: [['id', 'host'], …].
+     *
+     * @return array<array{id: int|string, host: string}>
+     */
+    public function due(int $afterId = 0, ?int $limit = null): array
+    {
+        return $this->dueQuery()->select(['h.id', 'h.host'])->andWhere(['>', 'h.id', $afterId])->limit($limit)->all();
+    }
+
+    /**
+     * Adds a row for the domains of a page that don't have one yet, due at once.
+     *
+     * @param string[] $hosts
+     */
+    public function addHosts(array $hosts): void
+    {
+        $now = Db::prepareDateForDb(new \DateTime());
+        foreach (array_chunk($hosts, 500) as $chunk) {
+            $new = array_values(array_diff($chunk, (new Query())->select(['host'])->from(self::TABLE)->where(['host' => $chunk])->column()));
+            if (!$new) {
+                continue;
+            }
+            try {
+                Db::batchInsert(self::TABLE, ['host', 'resolves', 'failures', 'nextCheckAt'], array_map(fn(string $host) => [$host, true, 0, $now], $new));
+            } catch (\Throwable) {
+                // Another job added one of them meanwhile
+                foreach ($new as $host) {
+                    Db::upsert(self::TABLE, ['host' => $host, 'resolves' => true, 'failures' => 0, 'nextCheckAt' => $now], false);
+                }
+            }
+        }
+    }
+
+    /**
+     * Pushes a queue job when domains are due, unless one is waiting or running.
      */
     public function queueIfDue(): void
     {
@@ -68,17 +92,65 @@ class Hosts extends Component
         if (!LinkChecker::getInstance()->getSettings()->checkDomains || $cache->exists(self::QUEUED_KEY)) {
             return;
         }
-        if ($this->due() && $cache->add(self::QUEUED_KEY, true, 3600)) {
-            Queue::push(new CheckHostsJob());
+        if ($this->dueQuery()->exists() && $cache->add(self::QUEUED_KEY, true, 3600)) {
+            LinkChecker::push(new CheckHostsJob());
         }
     }
 
     /**
-     * A job started: the next save may push another one.
+     * A batch of the job started: it's still running (the key expires an hour after the last batch, when a job died).
      */
-    public function jobStarted(): void
+    public function keepQueued(): void
+    {
+        Craft::$app->getCache()->set(self::QUEUED_KEY, true, 3600);
+    }
+
+    /**
+     * The job is done: domains that became due since get a new one.
+     */
+    public function jobFinished(): void
     {
         Craft::$app->getCache()->delete(self::QUEUED_KEY);
+        $this->queueIfDue();
+    }
+
+    /**
+     * A page of a host answered: 401, 403 or 429 ($refused) REFUSALS times in a row leaves the host alone for two weeks,
+     * any other answer resets the count.
+     */
+    public function answered(string $host, bool $refused): void
+    {
+        if ($host === '') {
+            return;
+        }
+        $refusals = (int)(new Query())->select(['refusals'])->from(self::TABLE)->where(['host' => $host])->scalar();
+        if (!$refused) {
+            if ($refusals > 0) {
+                Db::update(self::TABLE, ['refusals' => 0, 'refusedUntil' => null], ['host' => $host], [], false);
+            }
+            return;
+        }
+        $refusals = min($refusals + 1, 100);
+        $until = $refusals >= Urls::REFUSALS ? Db::prepareDateForDb((new \DateTime())->add(new \DateInterval(self::REFUSED_FOR))) : null;
+        Db::update(self::TABLE, ['refusals' => $until !== null ? 0 : $refusals, 'refusedUntil' => $until], ['host' => $host], [], false);
+    }
+
+    /**
+     * Removes the domains no page links to any more, a month after their last lookup.
+     */
+    public function prune(): int
+    {
+        $before = Db::prepareDateForDb((new \DateTime())->sub(new \DateInterval('P30D')));
+        $ids = (new Query())
+            ->select(['h.id'])
+            ->from(['h' => self::TABLE])
+            ->where(['not exists', (new Query())->from(['l' => Index::TABLE])->where('[[l.host]] = [[h.host]]')])
+            ->andWhere(['or', ['h.checkedAt' => null], ['<', 'h.checkedAt', $before]])
+            ->column();
+        foreach (array_chunk($ids, 500) as $chunk) {
+            Db::delete(self::TABLE, ['id' => $chunk]);
+        }
+        return count($ids);
     }
 
     /**
@@ -91,8 +163,8 @@ class Hosts extends Component
     }
 
     /**
-     * Looks up these domains and stores the results. Returns false (and stores nothing) when the lookups can't be trusted.
-     * A domain another job looked up since it became due is skipped.
+     * Looks up these domains and stores the results (the console commands). Returns false (and stores nothing) when the
+     * lookups can't be trusted. A domain a job looked up since it became due is skipped.
      *
      * @param string[] $hosts
      * @param callable|null $progress function(int $done, int $total)
@@ -107,20 +179,25 @@ class Hosts extends Component
             return false;
         }
         $hosts = array_values($hosts);
-        $stored = false;
         foreach ($hosts as $i => $host) {
-            if ($this->isDue($host)) {
-                $this->store($host, self::resolves($host));
-                $stored = true;
-            }
+            $this->checkOne($host);
             if ($progress) {
                 $progress($i + 1, count($hosts));
             }
         }
-        if ($stored) {
-            Report::invalidate();
-        }
+        Report::flush();
         return true;
+    }
+
+    /**
+     * Looks up one domain and stores the result, unless another job looked it up since it became due. Only when lookups
+     * work (lookupsWork()).
+     */
+    public function checkOne(string $host): void
+    {
+        if ($this->isDue($host)) {
+            $this->store($host, self::resolves($host));
+        }
     }
 
     /**
@@ -128,17 +205,8 @@ class Hosts extends Component
      */
     public function isDue(string $host): bool
     {
-        $row = (new Query())->select(['resolves', 'failures', 'checkedAt'])->from(self::TABLE)->where(['host' => $host])->one();
-        if ($row === null || $row === false) {
-            return true;
-        }
-        $interval = match (true) {
-            !$row['resolves'] => self::RECHECK_FAILED,
-            (int)$row['failures'] > 0 => self::RECHECK_FIRST_FAILURE,
-            default => self::RECHECK_OK,
-        };
-        $since = (new \DateTime())->sub(new \DateInterval($interval));
-        return Db::prepareDateForDb($since) > $row['checkedAt'];
+        $next = (new Query())->select(['nextCheckAt'])->from(self::TABLE)->where(['host' => $host])->scalar();
+        return $next === false || $next === null || $next <= Db::prepareDateForDb(new \DateTime());
     }
 
     /**
@@ -151,12 +219,32 @@ class Hosts extends Component
         if (!$resolves) {
             $failures = Urls::failures((int)($previous['failures'] ?? 0), $previous['checkedAt'] ?? null, time());
         }
+        $found = $resolves || $failures < self::FAILURES;
+        $interval = self::recheckInterval($found, $failures);
+        // The report only changes when a domain is found missing, or found again
+        if ($previous !== null && $previous !== false && (bool)$previous['resolves'] !== $found) {
+            Report::markDirty();
+        }
         Db::upsert(self::TABLE, [
             'host' => $host,
-            'resolves' => $resolves || $failures < self::FAILURES,
+            'resolves' => $found,
             'failures' => min($failures, 100),
             'checkedAt' => Db::prepareDateForDb(new \DateTime()),
+            'nextCheckAt' => Db::prepareDateForDb((new \DateTime())->add(new \DateInterval($interval))),
         ]);
+    }
+
+    /**
+     * When a domain is looked up again: a week after it was found, an hour after a first failed lookup, a day after it was
+     * found missing.
+     */
+    public static function recheckInterval(bool $resolves, int $failures): string
+    {
+        return match (true) {
+            !$resolves => self::RECHECK_FAILED,
+            $failures > 0 => self::RECHECK_FIRST_FAILURE,
+            default => self::RECHECK_OK,
+        };
     }
 
     /**

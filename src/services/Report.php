@@ -4,16 +4,19 @@ namespace statikbe\linkchecker\services;
 
 use Craft;
 use craft\base\Component;
+use craft\base\ElementInterface;
 use craft\db\Query;
 use craft\db\Table;
+use craft\elements\Asset;
+use craft\elements\Category;
 use craft\elements\Entry;
 use craft\elements\GlobalSet;
 use craft\elements\User;
 use craft\helpers\Db;
+use craft\helpers\ElementHelper;
 use statikbe\linkchecker\helpers\LinkParser;
 use statikbe\linkchecker\LinkChecker;
 use statikbe\linkchecker\models\Settings;
-use yii\caching\TagDependency;
 use yii\db\Expression;
 
 /**
@@ -24,14 +27,31 @@ use yii\db\Expression;
  * - broken: the link leads nowhere (counted in the widget's headline);
  * - warning: the link works but may not be what the editor wants (an entry that isn't live yet, a link to another
  *   language, an invalid email address or phone number).
+ *
+ * The report is cached once for everyone (filtered per user when it's read) for up to 10 minutes, and built by one request
+ * at a time: others get the previous one meanwhile. It's cleared at most once per request or queue job, when something it
+ * shows changes (markDirty()).
  */
 class Report extends Component
 {
     public const BROKEN = 'broken';
     public const WARNING = 'warning';
 
-    private const CACHE_TAG = 'linkchecker:report';
+    /** ['version' => string, 'time' => int, 'problems' => array]: the last report built, also after it's outdated */
+    private const CACHE_KEY = 'linkchecker:report';
+    /** Changes when the report is cleared (invalidate()) */
+    private const VERSION_KEY = 'linkchecker:report-version';
+    private const LOCK = 'linkchecker:report-build';
     private const CACHE_DURATION = 600;
+
+    /** Attributes of a link target whose change can change the report */
+    private const TARGET_ATTRIBUTES = ['uri', 'slug', 'enabled', 'enabledForSite', 'archived', 'postDate', 'expiryDate'];
+
+    /** Whether the report has to be cleared at the end of the request or queue job */
+    private static bool $dirty = false;
+
+    /** Whether flush() runs at the end of the request (once per process, also in a queue worker that handles many jobs) */
+    private static bool $flushRegistered = false;
 
     /** Reasons per severity */
     public const REASONS = [
@@ -99,34 +119,226 @@ class Report extends Component
     }
 
     /**
-     * Every link with a problem (problems()), cached per user for a few minutes. The cache is cleared when pages are read
-     * again, external links or domains are checked, a link is ignored, or an element is saved, deleted or restored.
+     * Every link with a problem (problems()), for the pages this user may edit (null: every page). Cached for everyone for
+     * up to 10 minutes; while one request builds it, the others get the previous report.
      *
      * @return array<array<string, mixed>>
      */
     public function cachedProblems(?User $user = null): array
     {
-        $key = 'linkchecker:problems:' . ($user === null || $user->admin ? 'all' : $user->id);
-        $cache = Craft::$app->getCache();
-        $problems = $cache->get($key);
-        if (!is_array($problems)) {
-            $problems = $this->problems($user);
-            $cache->set($key, $problems, self::CACHE_DURATION, new TagDependency(['tags' => [self::CACHE_TAG]]));
-        }
-        return $problems;
+        $problems = $this->allProblems();
+        return $user === null || $user->admin ? $problems : $this->forUser($problems, $user);
     }
 
     /**
-     * Clears the cached report (cachedProblems()).
+     * @return array<array<string, mixed>>
+     */
+    private function allProblems(): array
+    {
+        self::flush();
+        $cache = Craft::$app->getCache();
+        $version = $cache->get(self::VERSION_KEY);
+        if (!is_string($version)) {
+            $version = self::newVersion();
+        }
+        $entry = $cache->get(self::CACHE_KEY);
+        $previous = is_array($entry) && is_array($entry['problems'] ?? null) ? $entry : null;
+        if ($previous !== null && self::isFresh($previous, $version)) {
+            return $previous['problems'];
+        }
+
+        // One request builds it; the others get the previous report meanwhile, or wait for it when there's none
+        $mutex = Craft::$app->getMutex();
+        if (!$mutex->acquire(self::LOCK, $previous !== null ? 0 : 30)) {
+            return $previous['problems'] ?? $this->problems();
+        }
+        try {
+            $entry = $cache->get(self::CACHE_KEY);
+            $version = $cache->get(self::VERSION_KEY);
+            $version = is_string($version) ? $version : self::newVersion();
+            if (is_array($entry) && is_array($entry['problems'] ?? null) && self::isFresh($entry, $version)) {
+                return $entry['problems'];
+            }
+            $problems = $this->problems();
+            // Kept after it's outdated, as the previous report
+            $cache->set(self::CACHE_KEY, ['version' => $version, 'time' => time(), 'problems' => $problems], 0);
+            return $problems;
+        } finally {
+            $mutex->release(self::LOCK);
+        }
+    }
+
+    /**
+     * @param array{version?: mixed, time?: mixed} $entry
+     */
+    private static function isFresh(array $entry, string $version): bool
+    {
+        return ($entry['version'] ?? null) === $version && (int)($entry['time'] ?? 0) > time() - self::CACHE_DURATION;
+    }
+
+    private static function newVersion(): string
+    {
+        $version = uniqid('', true);
+        Craft::$app->getCache()->set(self::VERSION_KEY, $version, 0);
+        return $version;
+    }
+
+    /**
+     * Clears the cached report now (cachedProblems()): one small cache write.
      */
     public static function invalidate(): void
     {
-        TagDependency::invalidate(Craft::$app->getCache(), self::CACHE_TAG);
+        self::$dirty = false;
+        self::newVersion();
     }
 
     /**
-     * Every link with a problem, with its reason and severity. Only the links that may have one are read: a link to an
-     * own-site URL of a live page without an anchor never reaches PHP.
+     * The report has to be cleared: at the end of the request or queue job, once (flush()).
+     */
+    public static function markDirty(): void
+    {
+        self::$dirty = true;
+        if (!self::$flushRegistered) {
+            self::$flushRegistered = true;
+            Craft::$app->onAfterRequest(fn() => self::flush());
+        }
+    }
+
+    /**
+     * Clears the report when it has to be (markDirty()).
+     */
+    public static function flush(): void
+    {
+        if (self::$dirty) {
+            self::invalidate();
+        }
+    }
+
+    /**
+     * After an element is saved, deleted or restored: whether that can change the report, and then mark it to be cleared.
+     * Only for elements a link can lead to (entries in a section, assets, categories, other elements with URLs), and only
+     * when what decides a link's state changed (URI, status, dates; a new element with a URI can make a link work). Not for
+     * drafts, revisions, propagation to other sites or resaving: the report catches up within 10 minutes.
+     */
+    public static function elementChanged(ElementInterface $element, bool $saved, bool $isNew = false): void
+    {
+        if (self::$dirty || $element->propagating || $element->resaving || ElementHelper::isDraftOrRevision($element)) {
+            return;
+        }
+        if ($element instanceof Entry) {
+            // A nested entry has no page of its own: a link to it is broken whatever its state
+            if ($element->sectionId === null) {
+                return;
+            }
+        } elseif (!$element instanceof Asset && !$element instanceof Category && !$element::hasUris()) {
+            return;
+        }
+        if ($saved && $element instanceof Asset) {
+            // Saving an asset (an upload, a new alt text) doesn't change whether a link to it works; deleting it does
+            return;
+        }
+        $matters = self::changeMatters(
+            $saved,
+            $isNew || $element->firstSave || $element->isNewForSite,
+            $element->uri !== null,
+            $saved && ElementHelper::shouldTrackChanges($element) ? $element->getDirtyAttributes() : null,
+            fn() => (new Query())->from(Index::TABLE)->where(['targetId' => $element->id])->exists(),
+        );
+        if ($matters) {
+            self::markDirty();
+        }
+    }
+
+    /**
+     * Whether a change to an element a link can lead to can change the report.
+     *
+     * @param bool $saved saved (or else deleted or restored)
+     * @param bool $new saved for the first time (in this site)
+     * @param bool $hasUri whether it has a URL (an own-site URL can lead to it)
+     * @param string[]|null $dirty the attributes that changed; null when changes aren't tracked (applying a draft)
+     * @param callable(): bool $linked whether a link leads to it
+     */
+    public static function changeMatters(bool $saved, bool $new, bool $hasUri, ?array $dirty, callable $linked): bool
+    {
+        if (!$saved) {
+            // Deleted or restored
+            return $hasUri || $linked();
+        }
+        if ($new) {
+            // A new page can make an own-site URL work
+            return $hasUri;
+        }
+        // Without tracked changes, the change can't be told apart
+        return $dirty === null || (bool)array_intersect(self::TARGET_ATTRIBUTES, $dirty);
+    }
+
+    /**
+     * The problems on the pages a user may edit: entries in sections where they may save other people's entries, their own
+     * entries where they may only save their own, the global sets they may edit, and only in the sites they may edit.
+     *
+     * @param array<array<string, mixed>> $problems
+     * @return array<array<string, mixed>>
+     */
+    public function forUser(array $problems, User $user): array
+    {
+        if ($user->admin || !$problems) {
+            return $problems;
+        }
+        $peer = [];
+        $own = [];
+        foreach (Craft::$app->getEntries()->getAllSections() as $section) {
+            if ($user->can("savePeerEntries:$section->uid")) {
+                $peer[(int)$section->id] = true;
+            } elseif ($user->can("saveEntries:$section->uid")) {
+                $own[(int)$section->id] = true;
+            }
+        }
+        $globalSets = array_fill_keys($this->editableGlobalSetIds($user), true);
+        if (!$peer && !$own && !$globalSets) {
+            return [];
+        }
+        $sites = null;
+        if (Craft::$app->getIsMultiSite()) {
+            $sites = [];
+            foreach (Craft::$app->getSites()->getAllSites(true) as $site) {
+                if ($user->can("editSite:$site->uid")) {
+                    $sites[(int)$site->id] = true;
+                }
+            }
+            if (!$sites) {
+                return [];
+            }
+        }
+        // Their own entries, among the pages in sections where they may only save their own
+        $authored = [];
+        if ($own) {
+            $ids = [];
+            foreach ($problems as $problem) {
+                if (isset($own[(int)$problem['sectionId']])) {
+                    $ids[(int)$problem['sourceId']] = true;
+                }
+            }
+            foreach (array_chunk(array_keys($ids), 500) as $chunk) {
+                $authored += array_fill_keys(array_map('intval', (new Query())
+                    ->select(['entryId'])
+                    ->from(Table::ENTRIES_AUTHORS)
+                    ->where(['entryId' => $chunk, 'authorId' => $user->id])
+                    ->column()), true);
+            }
+        }
+        return array_values(array_filter($problems, function(array $problem) use ($peer, $own, $globalSets, $sites, $authored) {
+            $sectionId = (int)$problem['sectionId'];
+            $editable = isset($peer[$sectionId])
+                || (isset($own[$sectionId]) && isset($authored[(int)$problem['sourceId']]))
+                || ($problem['globalSetId'] !== null && isset($globalSets[(int)$problem['globalSetId']]));
+            return $editable && ($sites === null || isset($sites[(int)$problem['siteId']]));
+        }));
+    }
+
+    /**
+     * Every link with a problem, with its reason and severity (for the pages a user may edit, when given). Only the links
+     * that may have one are read: a link to an own-site URL of a live page without an anchor never reaches PHP. The
+     * columns that are only shown (where the link is, the titles) are read for the problems only.
      *
      * @return array<array<string, mixed>>
      */
@@ -159,12 +371,11 @@ class Report extends Component
 
         $query = (new Query())
             ->select([
-                'l.sourceId', 'l.siteId', 'l.location', 'l.kind', 'l.targetId', 'l.targetSiteId', 'l.uri', 'l.url', 'l.suffix',
-                'l.label', 'l.issue', 'l.fallbackUri', 'l.fallbackSiteId', 'l.host',
-                'sourceTitle' => 'coalesce([[ses.title]], [[gs.name]])',
+                'l.id', 'l.sourceId', 'l.siteId', 'l.kind', 'l.targetId', 'l.targetSiteId', 'l.uri', 'l.url', 'l.suffix',
+                'l.issue', 'l.fallbackUri', 'l.fallbackSiteId', 'l.host',
                 'targetElementId' => 'te.id', 'targetDeleted' => 'te.dateDeleted', 'targetEnabled' => 'te.enabled',
                 'targetArchived' => 'te.archived', 'targetSiteRow' => 'tes.id', 'targetSiteEnabled' => 'tes.enabled',
-                'targetUri' => 'tes.uri', 'targetTitle' => 'tes.title', 'targetPostDate' => 'ten.postDate',
+                'targetUri' => 'tes.uri', 'targetPostDate' => 'ten.postDate',
                 'targetExpiryDate' => 'ten.expiryDate',
                 'hostResolves' => 'h.resolves',
                 'externalStatus' => 'u.status',
@@ -189,11 +400,13 @@ class Report extends Component
             ->where(['se.dateDeleted' => null, 'se.draftId' => null, 'se.revisionId' => null])
             ->andWhere(['or', ['not', ['sen.id' => null]], ['not', ['gs.id' => null]]])
             ->andWhere(['or',
-                ['not', ['l.issue' => null]],
-                $settings->checkAnchors ? ['not', ['l.suffix' => null]] : '1 = 0',
+                // Invalid email addresses and phone numbers (a route or an invalid URL is never reported)
+                ['l.issue' => array_keys(self::REASONS)],
+                // An anchor, on a link that can have one checked
+                $settings->checkAnchors ? ['and', ['like', 'l.suffix', '#'], ['l.kind' => [LinkParser::KIND_ENTRY, LinkParser::KIND_CATEGORY, LinkParser::KIND_URL, LinkParser::KIND_ANCHOR]]] : '1 = 0',
                 $settings->checkDomains ? ['h.resolves' => false] : '1 = 0',
                 $settings->checkExternal ? ['u.status' => [Urls::BROKEN, Urls::REDIRECT]] : '1 = 0',
-                ['and', ['l.kind' => LinkParser::KIND_URL], ['not exists', $livePage]],
+                ['and', ['l.kind' => LinkParser::KIND_URL], ['or', ['l.issue' => null], ['not', ['l.issue' => 'route']]], ['not exists', $livePage]],
                 ['and',
                     ['l.kind' => $elementKinds],
                     ['or',
@@ -209,21 +422,42 @@ class Report extends Component
                         $crossSite ? '[[l.targetSiteId]] <> [[l.siteId]]' : '1 = 0',
                     ],
                 ],
-            ])
-            ->orderBy(['l.sourceId' => SORT_ASC, 'l.siteId' => SORT_ASC, 'l.id' => SORT_ASC]);
+            ]);
 
         if ($sourceId !== null) {
             $query->andWhere(['l.sourceId' => $sourceId]);
         }
-        if ($user !== null && !$user->admin) {
-            $condition = $this->editableCondition($user);
-            if ($condition === null) {
-                return [];
-            }
-            $query->andWhere($condition);
-        }
 
-        return $this->judge($query->all());
+        $problems = $this->judge($query->all());
+
+        // What's only shown, for the problems
+        $shown = [];
+        foreach (array_chunk(array_column($problems, 'id'), 500) as $ids) {
+            $rows = (new Query())
+                ->select([
+                    'l.id', 'l.location', 'l.label',
+                    'sourceTitle' => 'coalesce([[ses.title]], [[gs.name]])',
+                    'targetTitle' => 'tes.title',
+                    'sectionId' => 'sen.sectionId',
+                    'globalSetId' => 'gs.id',
+                ])
+                ->from(['l' => Index::TABLE])
+                ->innerJoin(['ses' => Table::ELEMENTS_SITES], '[[ses.elementId]] = [[l.sourceId]] AND [[ses.siteId]] = [[l.siteId]]')
+                ->leftJoin(['sen' => Table::ENTRIES], '[[sen.id]] = [[l.sourceId]]')
+                ->leftJoin(['gs' => Table::GLOBALSETS], '[[gs.id]] = [[l.sourceId]]')
+                ->leftJoin(['tes' => Table::ELEMENTS_SITES], '[[tes.elementId]] = [[l.targetId]] AND [[tes.siteId]] = [[l.targetSiteId]]')
+                ->where(['l.id' => $ids])
+                ->all();
+            foreach ($rows as $row) {
+                $shown[(int)$row['id']] = $row;
+            }
+        }
+        foreach ($problems as $i => $problem) {
+            $problems[$i] = array_merge($problem, $shown[(int)$problem['id']] ?? ['location' => '', 'label' => null, 'sourceTitle' => '', 'targetTitle' => null, 'sectionId' => null, 'globalSetId' => null]);
+        }
+        usort($problems, fn(array $a, array $b) => [(int)$a['sourceId'], (int)$a['siteId'], (int)$a['id']] <=> [(int)$b['sourceId'], (int)$b['siteId'], (int)$b['id']]);
+
+        return $user !== null ? $this->forUser($problems, $user) : $problems;
     }
 
     /**
@@ -615,53 +849,6 @@ class Report extends Component
             }
         }
         return $ids;
-    }
-
-    /**
-     * The pages a user may edit, as a condition on the report's query: entries in sections where they may save other
-     * people's entries, their own entries where they may only save their own, the global sets they may edit, and only in the
-     * sites they may edit. Null when there are none.
-     *
-     * @return array<mixed>|null
-     */
-    private function editableCondition(User $user): ?array
-    {
-        $peer = [];
-        $own = [];
-        foreach (Craft::$app->getEntries()->getAllSections() as $section) {
-            if ($user->can("savePeerEntries:$section->uid")) {
-                $peer[] = (int)$section->id;
-            } elseif ($user->can("saveEntries:$section->uid")) {
-                $own[] = (int)$section->id;
-            }
-        }
-        $globalSets = $this->editableGlobalSetIds($user);
-        if (!$peer && !$own && !$globalSets) {
-            return null;
-        }
-        $authored = (new Query())
-            ->select(new Expression('1'))
-            ->from(['ea' => Table::ENTRIES_AUTHORS])
-            ->where('[[ea.entryId]] = [[l.sourceId]]')
-            ->andWhere(['ea.authorId' => $user->id]);
-        $condition = ['or',
-            ['sen.sectionId' => $peer ?: [0]],
-            ['and', ['sen.sectionId' => $own ?: [0]], ['exists', $authored]],
-            ['gs.id' => $globalSets ?: [0]],
-        ];
-        if (Craft::$app->getIsMultiSite()) {
-            $sites = [];
-            foreach (Craft::$app->getSites()->getAllSites(true) as $site) {
-                if ($user->can("editSite:$site->uid")) {
-                    $sites[] = (int)$site->id;
-                }
-            }
-            if (!$sites) {
-                return null;
-            }
-            $condition = ['and', $condition, ['l.siteId' => $sites]];
-        }
-        return $condition;
     }
 
     /**

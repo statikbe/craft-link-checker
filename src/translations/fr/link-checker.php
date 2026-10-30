@@ -60,4 +60,5 @@ return [
     'Ignored links' => 'Liens ignorés',
     'No links are ignored. Ignore a link here or in the Links panel of a page: it’s no longer reported anywhere.' => 'Aucun lien n\'est ignoré. Ignorez un lien ici ou dans le panneau Liens d\'une page : il n\'est alors plus signalé nulle part.',
     'Stop ignoring' => 'Ne plus ignorer',
+    'Checking the links…' => 'Vérification des liens…',
 ];

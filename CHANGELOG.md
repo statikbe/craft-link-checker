@@ -1,5 +1,31 @@
 # Release Notes for Link Checker
 
+## 1.4.0 - 2026-10-31
+
+> [!IMPORTANT]
+> Run `php craft up` after updating: a migration adds the pending pages table and new columns, and the rows of the domains
+> and URLs that weren't checked yet.
+
+### Changed
+- The report is cached once for everyone (filtered per user when it's read) and built by one request at a time; others get the previous report meanwhile
+- The report is only cleared when something it shows changes, at most once per request or queue job: not for every element save (drafts, nested entries, saved assets, users, form submissions, resaving and propagation don't clear it), and after external checks only when a link becomes or stops being broken
+- The report reads fewer rows: only links whose anchor can be checked, no routes or invalid URLs, and the columns that are only shown are read for the problems only
+- Saved pages are added to a pending table and read by one queue job at a time, in batches of 20; saving a page again while it waits adds no work, and pages saved in a queue job (an import) are read after that job
+- Reading a page loads its nested entries a level at a time for all their siblings (eager loading): about 10× fewer queries for a page with many blocks, also for the check on publish and the Links panel
+- Queue jobs carry no lists: each batch takes the next rows from the tables (a few bytes instead of up to megabytes per batch), only one job of a kind runs at a time, and every job has a TTR and a lower priority than Craft's own jobs
+- Whether domains and URLs are due is an indexed lookup instead of a scan of every link
+- An unknown external result is checked again after 1, 3, 7, then 14 days; a host that refuses link checkers (401, 403, 429) five times in a row is left alone for two weeks
+- No `hostDelay` between the steps of one check, DNS answers are reused within a job, and one check takes at most twice the timeout
+- The Links panel loads its list after the page, and reloads once the editor pauses instead of after every autosave (a minute while collapsed)
+- In block mode, the check on publish reads the page once instead of twice
+- The CSV export is written to a temporary file and fetches edit URLs in chunks
+- Domains and URLs no page links to any more are removed after a month
+- `link-checker/rebuild` no longer clears Craft's element caches (and with them the site's `{% cache %}` tags) while it runs
+- Updating from 1.2 reads only the pages with protocol-relative links again, not every page
+
+### Removed
+- The unused index on the links' kind
+
 ## 1.3.0 - 2026-10-31
 
 ### Changed

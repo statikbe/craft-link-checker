@@ -30,27 +30,34 @@ class UtilityController extends Controller
         $problems = LinkCheckerUtility::filtered($plugin->getReport()->cachedProblems(), $filters);
         $sites = Craft::$app->getSites();
 
+        // Written to a temporary file (php://temp moves to disk above 2 MB) and sent from there; the edit URLs are fetched
+        // for 100 pages at a time, so a large export doesn't hold every page in memory
         $handle = fopen('php://temp', 'r+');
         fputcsv($handle, ['Page', 'Site', 'Edit URL', 'Location', 'Link', 'Target', 'Severity', 'Reason'], escape: '');
-        $editUrls = $plugin->getReport()->editUrls($problems);
+        $pages = [];
         foreach ($problems as $problem) {
-            $key = $problem['sourceId'] . '-' . $problem['siteId'];
-            fputcsv($handle, array_map([self::class, 'csvCell'], [
-                $problem['sourceTitle'],
-                $sites->getSiteById((int)$problem['siteId'], true)?->getName() ?? '',
-                $editUrls[$key],
-                $problem['location'],
-                $problem['label'] ?? '',
-                $problem['targetTitle'] ?? $problem['url'],
-                $problem['severity'],
-                Report::reasonLabel((string)$problem['reason']),
-            ]), escape: '');
+            $pages[$problem['sourceId'] . '-' . $problem['siteId']][] = $problem;
+        }
+        foreach (array_chunk($pages, 100, true) as $chunk) {
+            $editUrls = $plugin->getReport()->editUrls(array_map(fn(array $links) => $links[0], $chunk));
+            foreach ($chunk as $key => $links) {
+                foreach ($links as $problem) {
+                    fputcsv($handle, array_map([self::class, 'csvCell'], [
+                        $problem['sourceTitle'],
+                        $sites->getSiteById((int)$problem['siteId'], true)?->getName() ?? '',
+                        $editUrls[$key],
+                        $problem['location'],
+                        $problem['label'] ?? '',
+                        $problem['targetTitle'] ?? $problem['url'],
+                        $problem['severity'],
+                        Report::reasonLabel((string)$problem['reason']),
+                    ]), escape: '');
+                }
+            }
         }
         rewind($handle);
-        $csv = stream_get_contents($handle);
-        fclose($handle);
 
-        return $this->response->sendContentAsFile($csv, 'broken-links-' . date('Y-m-d') . '.csv', ['mimeType' => 'text/csv']);
+        return $this->response->sendStreamAsFile($handle, 'broken-links-' . date('Y-m-d') . '.csv', ['mimeType' => 'text/csv']);
     }
 
     /**

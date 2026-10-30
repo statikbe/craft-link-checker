@@ -3,30 +3,54 @@
 namespace statikbe\linkchecker\jobs;
 
 use Craft;
-use craft\queue\BaseJob;
+use craft\base\Batchable;
+use craft\db\Query;
+use craft\queue\BaseBatchedJob;
+use statikbe\linkchecker\helpers\CursorBatcher;
 use statikbe\linkchecker\LinkChecker;
+use statikbe\linkchecker\services\Index;
 
 /**
- * Reads the links of pages that were saved, after the editor's request, then queues the checks of new domains and external
- * links.
+ * Reads the links of the pages that were saved (the pending table), in batches, after the editor's request. Only one job
+ * runs at a time: pages saved meanwhile are read by this one or get a new job when it's done. After each batch, the checks
+ * of new domains and external links are queued.
  */
-class IndexPagesJob extends BaseJob
+class IndexPagesJob extends BaseBatchedJob
 {
-    /** @var int[] */
-    public array $ids = [];
+    public int $batchSize = 20;
 
-    public function execute($queue): void
+    /** @var int the id of the last pending row read */
+    public int $lastId = 0;
+
+    /** @var int|null the pending pages when the job started */
+    public ?int $total = null;
+
+    protected function loadData(): Batchable
     {
         $index = LinkChecker::getInstance()->getIndex();
-        foreach (array_values($this->ids) as $i => $id) {
-            $this->setProgress($queue, $i / max(1, count($this->ids)));
-            try {
-                $index->index((int)$id);
-            } catch (\Throwable $e) {
-                Craft::error("Couldn't read the links of element {$id}: {$e->getMessage()}", __METHOD__);
-            }
-        }
-        $index->indexed();
+        $this->total ??= (int)(new Query())->from(Index::PENDING_TABLE)->count();
+        return new CursorBatcher($this->total, fn(int $limit) => $index->pendingPages($this->lastId, $limit));
+    }
+
+    protected function beforeBatch(): void
+    {
+        LinkChecker::getInstance()->getIndex()->keepQueued();
+    }
+
+    protected function processItem(mixed $item): void
+    {
+        LinkChecker::getInstance()->getIndex()->indexPending($item);
+        $this->lastId = (int)$item['id'];
+    }
+
+    protected function afterBatch(): void
+    {
+        LinkChecker::getInstance()->getIndex()->indexed();
+    }
+
+    protected function after(): void
+    {
+        LinkChecker::getInstance()->getIndex()->jobFinished();
     }
 
     protected function defaultDescription(): ?string

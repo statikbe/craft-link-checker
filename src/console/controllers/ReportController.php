@@ -29,9 +29,11 @@ class ReportController extends Controller
     public function actionIndex(): int
     {
         $report = LinkChecker::getInstance()->getReport();
-        foreach ($report->pages($this->warnings) as $page) {
+        $pages = $report->pages($this->warnings);
+        $editUrls = $report->editUrls($pages);
+        foreach ($pages as $page) {
             $site = Craft::$app->getSites()->getSiteById($page['siteId'], true)->handle ?? $page['siteId'];
-            $this->stdout(sprintf("%s (%s, %s)\n", $page['title'], $site, $report->editUrl($page['sourceId'], $page['siteId'])), Console::FG_YELLOW);
+            $this->stdout(sprintf("%s (%s, %s)\n", $page['title'], $site, $editUrls[$page['sourceId'] . '-' . $page['siteId']]), Console::FG_YELLOW);
             foreach ($page['links'] as $link) {
                 $this->stdout(sprintf("  - [%s] %s: %s (%s)\n", $link['severity'], $link['location'], $link['label'] ?? $link['url'], $link['reason']));
             }

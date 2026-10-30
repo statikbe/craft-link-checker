@@ -1,8 +1,9 @@
 {# Links panel in an entry's sidebar (LinkChecker::sidebarHtml(), settings → panel): the problems of the page as it's edited.
-   Collapsible; the state is remembered in the browser (web/assets/cp/dist/panel.js). The ids are unique, so a panel in a
-   slideout works next to the one of the page. A slideout namespaces the ids, so the script finds it by data-lc-panel. #}
+   The list is loaded after the page (web/assets/cp/dist/panel.js), so the panel never slows the edit page down.
+   Collapsible; the state is remembered in the browser. The ids are unique, so a panel in a slideout works next to the one of
+   the page. A slideout namespaces the ids, so the script finds it by data-lc-panel. #}
 {% set panelId = 'lc-panel-' ~ entry.id ~ '-' ~ random() %}
-<fieldset id="{{ panelId }}" class="lc-panel" data-lc-panel="{{ panelId }}" data-site-id="{{ entry.siteId }}">
+<fieldset id="{{ panelId }}" class="lc-panel" data-lc-panel="{{ panelId }}" data-element-id="{{ entry.id }}" data-site-id="{{ entry.siteId }}">
     <legend class="h6 lc-panel__legend">
         <button type="button" class="lc-panel__toggle" aria-expanded="true" aria-controls="{{ panelId }}-body">
             <span class="lc-panel__chevron" aria-hidden="true"></span>
@@ -11,7 +12,7 @@
         </button>
     </legend>
     <div id="{{ panelId }}-body" class="meta lc-panel__body">
-        {% include 'link-checker/_panel/list' %}
+        <p class="lc-panel__loading light">{{ 'Checking the links…'|t('link-checker') }}</p>
     </div>
 </fieldset>
 <script>

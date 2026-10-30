@@ -13,7 +13,7 @@ editors can fix them before visitors find them.
 - **Broken links** dashboard widget: the pages with broken links, with a link to edit each one and every broken link with
   its reason and where it is (*Content builder 2 (Content row) › Columns 1 (Text) › Text*). Each user only sees the pages
   they may edit: in the sites they may edit, and other people's entries only with the permission to save them.
-- **Links panel** in the entry sidebar: the problems of the page as it's edited, updated after every autosave.
+- **Links panel** in the entry sidebar: the problems of the page as it's edited, updated when the editor pauses.
 - **Check on publish**: a warning (or, with `'block'`, an error that stops the save) when a page has broken links, shown on
   the row, the block or column and the field, as for Craft's own errors.
 - **Global sets** (a footer, site settings) are checked too.
@@ -29,14 +29,36 @@ and entries in CKEditor. No other plugin is needed, and it works on existing sit
 ## How it works
 
 Every link of every page is stored in a table, per site, with where it is. A page is read again when it (or a block on it) is
-saved, in a queue job right after the save, so saving isn't slower. **Whether a link is broken isn't stored**: it's worked
-out from the target's current state when the report is read. Deleting, disabling or restoring an entry shows up in the
-widget straight away, without reading the pages that link to it, and without cron. The report is cached for up to 10
-minutes, and cleared whenever an element is saved, deleted or restored, pages are read or links are checked or ignored; an
-entry whose post or expiry date passes shows up within those 10 minutes.
+saved, in a queue job after the save, so saving isn't slower. **Whether a link is broken isn't stored**: it's worked out
+from the target's current state when the report is read. Deleting, disabling or restoring an entry shows up in the widget
+straight away, without reading the pages that link to it, and without cron. The report is cached for up to 10 minutes, once
+for everyone (each user sees the pages they may edit), and cleared when something it shows changes: a page or link target
+is published, moved, disabled, deleted or restored, pages are read, a link becomes or stops being broken, or a link is
+ignored. An entry whose post or expiry date passes shows up within those 10 minutes.
 
 Only the links that may have a problem are read from the database: a link to a live page of the site itself without an
 anchor never leaves it, so the report stays fast on large sites.
+
+### Performance
+
+The plugin adds nothing to the front end: no queries, no scripts. In the control panel and the queue:
+
+- **Saving** an entry adds one row to a table of pages to read. One queue job at a time reads them, 20 pages per batch, after
+  Craft's own jobs (priority 2048). Saving the same page again while it waits doesn't add work. Resaving (`craft resave`,
+  a project config change) and propagating to other sites don't read pages again; imports in a queue job are read after
+  that job.
+- **Reading a page** loads its nested entries a level at a time for all siblings, so a page with hundreds of blocks takes a
+  few queries per level, not one per block.
+- **The report** is built by one request at a time; while it's built, other requests get the previous one. It's cleared at
+  most once per request or queue job, and not for drafts, nested entries, assets that are only saved, users, form
+  submissions, resaving or propagation.
+- **Queue jobs** carry no lists: each batch takes its next rows from the tables, so a job stays a few bytes, and a batch
+  stops in time (TTR 300 seconds). Only one job per kind waits at a time.
+- **External checks**: an unknown result (401, 403, 429, 5xx, a timeout) is checked again after 1, 3, 7 and then 14 days; a
+  host that answers 401, 403 or 429 five times in a row is left alone for two weeks. Domains and URLs no page links to any
+  more are removed after a month.
+- **The Links panel** loads its list after the page, and reloads once the editor pauses (10 seconds; a minute while it's
+  collapsed).
 
 Links to entries are stored by ID (`{entry:12@1:url}`), so renaming an entry or changing its URL doesn't break them. Only
 links typed as a URL break when a page moves. Those are matched against the URIs of the live entries, the routes and the
@@ -57,11 +79,14 @@ External links (to other websites) are checked in queue jobs, never in an editor
      a trailing slash.
    - Anything else (401, 403, 429, 5xx, a timeout, an SSL error): unknown, never reported. Sites that block link checkers
      would always look broken, so their pages aren't requested (`skipHosts`: Facebook, Instagram, LinkedIn, X, TikTok).
-   - A working page is checked again after 7 days, a failing one after an hour, a broken or unknown one after a day.
+   - A working page is checked again after 7 days, a failing one after an hour, a broken one after a day, an unknown one
+     after 1, 3, 7, then every 14 days. A host that answers 401, 403 or 429 to five checks in a row is left alone for two
+     weeks.
    - Redirects are followed by hand, so every step is checked: only http(s) on ports 80 and 443, never a host with an
      address (IPv4 or IPv6) that isn't public (the server's own network, cloud metadata, carrier-grade NAT), and the
      checked address is the one connected to. Requests always go through curl and never through a proxy.
-   - A new job is only pushed when none is waiting; a URL another job checked in the meantime is skipped.
+   - Only one job runs at a time; a URL another job checked in the meantime is skipped. Between two checks on the same host
+     it waits `hostDelay`; not between the steps of one check (a redirect, HEAD then GET).
 
 This needs outbound HTTP from the server. Where that's not allowed, set `'checkExternal' => false` for that environment;
 the domains are still checked.
@@ -159,8 +184,9 @@ isn't checked has no known anchors, so links to its anchors aren't reported.
 
 The sidebar of an entry gets a **Links** panel under the notes: the broken links and warnings of the page as it's edited,
 also the changes that aren't saved yet, with the reason and where each link is. It's collapsible (the browser remembers it
-for every entry) and reloads after every autosave. The number of broken links shows next to its title, also when it's
-collapsed.
+for every entry). Its list is loaded after the page, so it never slows the edit page down, and reloads once the editor pauses
+after an autosave (10 seconds; a minute while it's collapsed, and at once when it's opened). The number of broken links
+shows next to its title, also when it's collapsed.
 
 ## Check on publish
 

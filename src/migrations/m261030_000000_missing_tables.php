@@ -3,8 +3,8 @@
 namespace statikbe\linkchecker\migrations;
 
 use craft\db\Migration;
-use craft\helpers\Queue;
 use statikbe\linkchecker\jobs\RebuildJob;
+use statikbe\linkchecker\LinkChecker;
 
 /**
  * Creates the tables and columns that 1.1.0, 1.2.0 and 1.2.1 added (domains, external URLs, ignored links, the links'
@@ -16,7 +16,7 @@ class m261030_000000_missing_tables extends Migration
     public function safeUp(): bool
     {
         if (Install::createTables($this)) {
-            Queue::push(new RebuildJob());
+            LinkChecker::push(new RebuildJob());
         }
         return true;
     }

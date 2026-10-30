@@ -33,6 +33,8 @@ use statikbe\linkchecker\utilities\LinkCheckerUtility;
 use statikbe\linkchecker\web\assets\cp\LinkCheckerAsset;
 use statikbe\linkchecker\widgets\BrokenLinks;
 use yii\base\Event;
+use yii\queue\JobInterface;
+use yii\queue\Queue as YiiQueue;
 
 /**
  * Link Checker: finds the broken links in the content of entries and lists the pages that contain them.
@@ -41,7 +43,15 @@ use yii\base\Event;
  */
 class LinkChecker extends Plugin
 {
-    public string $schemaVersion = '1.3.0';
+    public string $schemaVersion = '1.4.0';
+
+    /** Priority of the plugin's queue jobs: after Craft's own (1024), such as search indexes and image transforms */
+    public const JOB_PRIORITY = 2048;
+
+    /** Seconds a batch of a queue job may take: a batch stops in time, so a worker never kills it */
+    public const JOB_TTR = 300;
+
+    private const PRUNED_KEY = 'linkchecker:pruned';
 
     public static function config(): array
     {
@@ -82,13 +92,23 @@ class LinkChecker extends Plugin
             });
         }
 
-        // A link's target changed (saved, deleted, restored): the cached report is read again
-        foreach ([Elements::EVENT_AFTER_SAVE_ELEMENT, Elements::EVENT_AFTER_DELETE_ELEMENT, Elements::EVENT_AFTER_RESTORE_ELEMENT] as $name) {
+        // A link's target changed (saved, deleted, restored): the cached report is cleared at the end of the request, when
+        // the change matters (Report::elementChanged())
+        Event::on(Elements::class, Elements::EVENT_AFTER_SAVE_ELEMENT, function(ElementEvent $event) {
+            Report::elementChanged($event->element, true, $event->isNew);
+        });
+        foreach ([Elements::EVENT_AFTER_DELETE_ELEMENT, Elements::EVENT_AFTER_RESTORE_ELEMENT] as $name) {
             Event::on(Elements::class, $name, function(ElementEvent $event) {
-                // One cache write: cheap, also during a resave
-                if (!$event->element->getIsDraft() && !$event->element->getIsRevision()) {
-                    Report::invalidate();
-                }
+                Report::elementChanged($event->element, false);
+            });
+        }
+
+        // A queue job (an import, a batch of a check) is done: the pages it saved are queued, and the report is cleared when
+        // it has to be, without waiting for the worker to stop
+        foreach ([YiiQueue::EVENT_AFTER_EXEC, YiiQueue::EVENT_AFTER_ERROR] as $name) {
+            Event::on(YiiQueue::class, $name, function() {
+                $this->getIndex()->flushPending();
+                Report::flush();
             });
         }
 
@@ -171,13 +191,14 @@ class LinkChecker extends Plugin
         }
         $view = Craft::$app->getView();
         $view->registerAssetBundle(LinkCheckerAsset::class);
+        // Only the panel: its list is loaded after the page (panelListHtml())
         return $view->renderTemplate('link-checker/_panel/panel', [
             'entry' => $entry,
-        ] + $this->panelVariables($entry), View::TEMPLATE_MODE_CP);
+        ], View::TEMPLATE_MODE_CP);
     }
 
     /**
-     * The list of the Links panel, also to refresh it after an autosave.
+     * The list of the Links panel: loaded after the page, and again after an autosave.
      */
     public function panelListHtml(Entry $entry): string
     {
@@ -201,11 +222,37 @@ class LinkChecker extends Plugin
     }
 
     /**
+     * Pushes one of the plugin's queue jobs: with a lower priority than Craft's own jobs, and a TTR, so a batched job stops
+     * each batch in time.
+     */
+    public static function push(JobInterface $job): void
+    {
+        Queue::push($job, self::JOB_PRIORITY, null, self::JOB_TTR);
+    }
+
+    /**
+     * Removes the domains and URLs no page links to any more, at most once a day (after a URL check job).
+     */
+    public function prune(): void
+    {
+        $cache = Craft::$app->getCache();
+        if (!$cache->add(self::PRUNED_KEY, true, 86400)) {
+            return;
+        }
+        try {
+            $this->getUrls()->prune();
+            $this->getHosts()->prune();
+        } catch (\Throwable $e) {
+            Craft::error("Couldn't prune the URLs and domains: {$e->getMessage()}", __METHOD__);
+        }
+    }
+
+    /**
      * Reads the links of every page once the plugin is installed.
      */
     protected function afterInstall(): void
     {
-        Queue::push(new RebuildJob());
+        self::push(new RebuildJob());
     }
 
     protected function createSettingsModel(): ?Model

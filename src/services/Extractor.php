@@ -32,6 +32,9 @@ class Extractor extends Component
     /** @var array<string, true> the anchors of the page being read */
     private array $anchors = [];
 
+    /** @var array<string, bool> whether a site URI is served by a route or a template (isRoute()), per URI */
+    private array $routes = [];
+
     /**
      * The links of a page in its site, and the anchors it defines (ids in its content, Entry Anchors fields).
      *
@@ -200,6 +203,11 @@ class Extractor extends Component
      */
     private function isRoute(string $uri): bool
     {
+        return $this->routes[$uri] ??= $this->findRoute($uri);
+    }
+
+    private function findRoute(string $uri): bool
+    {
         if ($uri === '__home__') {
             return false;
         }
@@ -230,14 +238,16 @@ class Extractor extends Component
     }
 
     /**
-     * The enabled entries of a Matrix value or entry query, as the templates render them.
+     * The enabled entries of a Matrix value or entry query, as the templates render them. Loaded for all the siblings of the
+     * element at once (eagerly()): one query per field and level of a page, not per nested entry. Siblings are always in
+     * one site: a page is read per site (Index::index()).
      *
      * @return Entry[]
      */
     private function entries(mixed $value): array
     {
         if ($value instanceof ElementQueryInterface) {
-            $value = $value->getCachedResult() ?? (clone $value)->all();
+            $value = $value->getCachedResult() ?? (clone $value)->eagerly()->all();
         }
         if (!is_iterable($value)) {
             return [];

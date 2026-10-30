@@ -5,9 +5,9 @@ namespace statikbe\linkchecker\console\controllers;
 use Craft;
 use craft\console\Controller;
 use craft\helpers\Console;
-use craft\helpers\Queue;
 use statikbe\linkchecker\jobs\RebuildJob;
 use statikbe\linkchecker\LinkChecker;
+use statikbe\linkchecker\services\Report;
 use yii\console\ExitCode;
 
 /**
@@ -34,7 +34,7 @@ class RebuildController extends Controller
     public function actionIndex(): int
     {
         if ($this->queue) {
-            Queue::push(new RebuildJob());
+            LinkChecker::push(new RebuildJob());
             $this->stdout("Queued: reading the links of every page.\n", Console::FG_GREEN);
             return ExitCode::OK;
         }
@@ -51,13 +51,14 @@ class RebuildController extends Controller
                 $failed[$id] = $e->getMessage();
                 Craft::error("Couldn't read the links of element {$id}: {$e->getMessage()}", __METHOD__);
             }
+            // Memory stays flat without clearing Craft's element caches (which would clear every {% cache %} of the site)
             if ($i % 50 === 0) {
-                Craft::$app->getElements()->invalidateAllCaches();
                 gc_collect_cycles();
             }
             Console::updateProgress($i + 1, $total);
         }
         Console::endProgress();
+        $index->flushExternal();
         $this->stdout("$total pages read.\n", Console::FG_GREEN);
         foreach ($failed as $id => $message) {
             $this->stderr("Couldn't read element $id: $message\n", Console::FG_RED);
@@ -65,7 +66,7 @@ class RebuildController extends Controller
 
         $plugin = LinkChecker::getInstance();
         if ($plugin->getSettings()->checkDomains) {
-            $due = $plugin->getHosts()->due();
+            $due = array_column($plugin->getHosts()->due(), 'host');
             if ($due) {
                 Console::startProgress(0, count($due), 'Checking the domains of external links: ');
                 $ok = $plugin->getHosts()->check($due, fn(int $done, int $total) => Console::updateProgress($done, $total));
@@ -83,7 +84,7 @@ class RebuildController extends Controller
                 Console::endProgress();
             }
         }
-        \statikbe\linkchecker\services\Report::invalidate();
+        Report::invalidate();
         $this->stdout("\n");
         return $this->run('/link-checker/report');
     }

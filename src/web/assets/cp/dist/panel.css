@@ -54,7 +54,8 @@
   padding: 12px var(--m, 14px);
 }
 
-.lc-panel__ok {
+.lc-panel__ok,
+.lc-panel__loading {
   margin: 0;
   font-size: 13px;
 }
